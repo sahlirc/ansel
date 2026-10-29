@@ -19,6 +19,8 @@
 #ifndef DT_GUI_DTGTK_PREVIEW_WINDOW_H
 #define DT_GUI_DTGTK_PREVIEW_WINDOW_H
 
+#include <stdint.h>
+
 void dt_preview_window_spawn(const int32_t imgid);
 
 #endif // DT_GUI_DTGTK_PREVIEW_WINDOW_H
