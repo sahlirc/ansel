@@ -52,6 +52,7 @@ typedef struct dt_preview_window_t
   int height;
   gboolean placed; // initial placement done: geometry changes now come from the user
   gboolean has_position; // restore_x/y were taken from the saved geometry at creation
+  gboolean centered; // restore_x/y are those of the content area (default centering), not of the window frame
   int restore_x, restore_y; // kept here: other previews' configure events rewrite the saved geometry meanwhile
   gboolean maximized;
   gboolean main_position_valid;
@@ -311,7 +312,21 @@ static void _preview_map_event(GtkWidget *window, GdkEvent *event, gpointer user
                            GDK_FUNC_MOVE | GDK_FUNC_RESIZE | GDK_FUNC_MAXIMIZE | GDK_FUNC_CLOSE);
 #endif
   if(!preview->placed && preview->has_position)
-    gtk_window_move(GTK_WINDOW(window), preview->restore_x, preview->restore_y);
+  {
+    int x = preview->restore_x, y = preview->restore_y;
+    if(preview->centered)
+    {
+      // gtk_window_move() places the frame, the centering computed the content: remove the decorations' offset.
+      GdkWindow *gdk_window = gtk_widget_get_window(window);
+      GdkRectangle frame = { 0 };
+      int origin_x = 0, origin_y = 0;
+      gdk_window_get_frame_extents(gdk_window, &frame);
+      gdk_window_get_origin(gdk_window, &origin_x, &origin_y);
+      x -= origin_x - frame.x;
+      y -= origin_y - frame.y;
+    }
+    gtk_window_move(GTK_WINDOW(window), x, y);
+  }
   if(!preview->placed && preview->maximized)
     gtk_window_maximize(GTK_WINDOW(window));
   preview->placed = TRUE;
@@ -450,7 +465,10 @@ void dt_preview_window_spawn(const int32_t imgid)
   // A saved position on a monitor that is gone would be unreachable: start afresh.
   if(!_preview_last.valid
      || !_preview_monitor_connected(gtk_widget_get_display(dialog), &_preview_last))
+  {
     _preview_center_last();
+    preview->centered = TRUE;
+  }
 
   preview->has_position = _preview_last.valid;
   preview->restore_x = _preview_last.x;
@@ -484,6 +502,8 @@ void dt_preview_window_spawn(const int32_t imgid)
   DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_DARKROOM_UI_CHANGED,
                                   G_CALLBACK(_preview_redraw), preview);
 
+  // Position hint honoured before mapping by most window managers; re-applied on map for the others.
+  if(!preview->centered) gtk_window_move(GTK_WINDOW(dialog), preview->restore_x, preview->restore_y);
   gtk_widget_show_all(dialog);
   gtk_window_present(GTK_WINDOW(dialog)); // above the previews already open
 }
