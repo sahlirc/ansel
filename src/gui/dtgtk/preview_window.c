@@ -265,7 +265,6 @@ static gboolean _preview_configure_event(GtkWidget *window, GdkEventConfigure *e
   }
   const GdkWindowState state = gdk_window_get_state(gdk_window);
   if(state & GDK_WINDOW_STATE_FULLSCREEN) return FALSE;
-  _preview_last.maximized = (state & GDK_WINDOW_STATE_MAXIMIZED) != 0;
 
   gdk_monitor_get_geometry(monitor, &_preview_last.monitor);
   gtk_window_get_position(GTK_WINDOW(window), &_preview_last.x, &_preview_last.y);
@@ -275,19 +274,27 @@ static gboolean _preview_configure_event(GtkWidget *window, GdkEventConfigure *e
   return FALSE;
 }
 
-/** @brief On Windows, keep the preview from being minimized by the taskbar or Win+D. */
-#ifdef GDK_WINDOWING_WIN32
+/**
+ * @brief Track maximized-state changes and, on Windows, prevent taskbar or Win+D minimization.
+ * The window manager may deliver a configure event before updating its maximized state, so
+ * geometry events cannot reliably tell us that a preview was restored to normal size.
+ */
 static gboolean _preview_window_state_event(GtkWidget *window, GdkEventWindowState *event, gpointer user_data)
 {
+  dt_preview_window_t *preview = (dt_preview_window_t *)user_data;
+  if(preview->placed && !(event->new_window_state & GDK_WINDOW_STATE_FULLSCREEN))
+    _preview_last.maximized = (event->new_window_state & GDK_WINDOW_STATE_MAXIMIZED) != 0;
+
+#ifdef GDK_WINDOWING_WIN32
   // The minimize box is removed on map, but the taskbar and Win+D can still iconify the window.
   if(event->new_window_state & GDK_WINDOW_STATE_ICONIFIED)
   {
     gtk_window_deiconify(GTK_WINDOW(window));
     return TRUE;
   }
+#endif
   return FALSE;
 }
-#endif
 
 /**
  * @brief Once mapped, re-apply the restored position (some window managers ignore the pre-map request)
@@ -456,9 +463,7 @@ void dt_preview_window_spawn(const int32_t imgid)
   g_signal_connect(G_OBJECT(dialog), "delete-event", G_CALLBACK(_preview_delete_event), preview);
   g_signal_connect(G_OBJECT(dialog), "key-press-event", G_CALLBACK(_preview_key_press_event), preview);
   g_signal_connect(G_OBJECT(dialog), "configure-event", G_CALLBACK(_preview_configure_event), preview);
-#ifdef GDK_WINDOWING_WIN32
   g_signal_connect(G_OBJECT(dialog), "window-state-event", G_CALLBACK(_preview_window_state_event), preview);
-#endif
   g_signal_connect(G_OBJECT(dialog), "map-event", G_CALLBACK(_preview_map_event), preview);
   preview->main_configure_handler =
       g_signal_connect(dt_gui_main_window(), "configure-event", G_CALLBACK(_preview_main_configure_event), preview);
