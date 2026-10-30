@@ -209,7 +209,7 @@ static gboolean _preview_key_press_event(GtkWidget *window, GdkEventKey *event, 
 }
 
 /**
- * @brief Move the preview with Ansel while preserving its offset from the main window.
+ * @brief Move the preview with Ansel while preserving its offset from the main window's center.
  * The preview is a separate toplevel, so window-manager transient ownership alone does not
  * move it when the parent is dragged. A preview on another monitor is independent and is
  * deliberately left in place.
@@ -220,8 +220,12 @@ static gboolean _preview_main_configure_event(GtkWidget *main_window, GdkEventCo
   GdkWindow *main_gdk_window = gtk_widget_get_window(main_window);
   if(IS_NULL_PTR(main_gdk_window)) return FALSE;
 
+  // Track the window's center rather than its origin: resizing from the right or bottom edge leaves the
+  // origin untouched but still shifts the lighttable, and the preview has to stay centered over it.
   int main_x = 0, main_y = 0;
   gdk_window_get_origin(main_gdk_window, &main_x, &main_y);
+  main_x += gdk_window_get_width(main_gdk_window) / 2;
+  main_y += gdk_window_get_height(main_gdk_window) / 2;
   if(!preview->main_position_valid)
   {
     preview->main_x = main_x;
