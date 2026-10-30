@@ -59,6 +59,7 @@ typedef struct dt_preview_window_t
   gboolean main_position_valid;
   int main_x, main_y;
   gulong main_configure_handler;
+  gulong center_allocate_handler;
   GdkMonitor *monitor; // the monitor this window currently sits on (identity only, never dereferenced once gone)
   gboolean evacuate; // its monitor was unplugged: to be reopened on the main monitor
   GdkMonitor *previous_monitor; // the one before, as the OS may have moved us away from an unplugged one
@@ -185,6 +186,8 @@ static void _preview_window_destroy(GtkWidget *dialog, gpointer user_data)
   g_signal_handlers_disconnect_by_data(gtk_widget_get_display(dialog), preview);
   if(preview->main_configure_handler != 0)
     g_signal_handler_disconnect(dt_gui_main_window(), preview->main_configure_handler);
+  if(preview->center_allocate_handler != 0)
+    g_signal_handler_disconnect(dt_ui_center_base(dt_gui_get_ui()), preview->center_allocate_handler);
   _preview_windows = g_list_remove(_preview_windows, preview);
   dt_view_image_surface_fetcher_cleanup(&preview->fetcher);
   dt_free(preview);
@@ -209,48 +212,63 @@ static gboolean _preview_key_press_event(GtkWidget *window, GdkEventKey *event, 
 }
 
 /**
- * @brief Move the preview with Ansel while preserving its offset from the main window's center.
+ * @brief Move the preview with Ansel while preserving its offset from the center of the lighttable area.
  * The preview is a separate toplevel, so window-manager transient ownership alone does not
  * move it when the parent is dragged. A preview on another monitor is independent and is
  * deliberately left in place.
  */
-static gboolean _preview_main_configure_event(GtkWidget *main_window, GdkEventConfigure *event, gpointer user_data)
+static void _preview_follow_center(dt_preview_window_t *preview)
 {
-  dt_preview_window_t *preview = (dt_preview_window_t *)user_data;
+  GtkWidget *main_window = dt_gui_main_window();
+  GtkWidget *center = dt_ui_center_base(dt_gui_get_ui());
   GdkWindow *main_gdk_window = gtk_widget_get_window(main_window);
-  if(IS_NULL_PTR(main_gdk_window)) return FALSE;
+  if(IS_NULL_PTR(main_gdk_window)) return;
 
-  // Track the window's center rather than its origin: resizing from the right or bottom edge leaves the
-  // origin untouched but still shifts the lighttable, and the preview has to stay centered over it.
+  // Track the center of the lighttable area, in screen coordinates: moving Ansel, resizing it from any
+  // edge, or opening/closing/resizing a side panel all shift it, and the preview has to stay centered over it.
   int main_x = 0, main_y = 0;
+  int center_x = 0, center_y = 0;
   gdk_window_get_origin(main_gdk_window, &main_x, &main_y);
-  main_x += gdk_window_get_width(main_gdk_window) / 2;
-  main_y += gdk_window_get_height(main_gdk_window) / 2;
+  gtk_widget_translate_coordinates(center, main_window, 0, 0, &center_x, &center_y);
+  main_x += center_x + gtk_widget_get_allocated_width(center) / 2;
+  main_y += center_y + gtk_widget_get_allocated_height(center) / 2;
   if(!preview->main_position_valid)
   {
     preview->main_x = main_x;
     preview->main_y = main_y;
     preview->main_position_valid = TRUE;
-    return FALSE;
+    return;
   }
 
   const int delta_x = main_x - preview->main_x;
   const int delta_y = main_y - preview->main_y;
   preview->main_x = main_x;
   preview->main_y = main_y;
-  if(!preview->placed || preview->evacuate || (delta_x == 0 && delta_y == 0)) return FALSE;
+  if(!preview->placed || preview->evacuate || (delta_x == 0 && delta_y == 0)) return;
 
   GdkWindow *preview_gdk_window = gtk_widget_get_window(preview->window);
-  if(IS_NULL_PTR(preview_gdk_window)) return FALSE;
+  if(IS_NULL_PTR(preview_gdk_window)) return;
   GdkDisplay *display = gtk_widget_get_display(main_window);
   GdkMonitor *main_monitor = gdk_display_get_monitor_at_window(display, main_gdk_window);
   GdkMonitor *preview_monitor = gdk_display_get_monitor_at_window(display, preview_gdk_window);
-  if(main_monitor != preview_monitor) return FALSE;
+  if(main_monitor != preview_monitor) return;
 
   int preview_x = 0, preview_y = 0;
   gtk_window_get_position(GTK_WINDOW(preview->window), &preview_x, &preview_y);
   gtk_window_move(GTK_WINDOW(preview->window), preview_x + delta_x, preview_y + delta_y);
+}
+
+/** @brief Ansel's window moved or was resized. */
+static gboolean _preview_main_configure_event(GtkWidget *main_window, GdkEventConfigure *event, gpointer user_data)
+{
+  _preview_follow_center((dt_preview_window_t *)user_data);
   return FALSE;
+}
+
+/** @brief The lighttable area changed size or position inside Ansel's window (side panels). */
+static void _preview_center_size_allocate(GtkWidget *center, GdkRectangle *allocation, gpointer user_data)
+{
+  _preview_follow_center((dt_preview_window_t *)user_data);
 }
 
 /**
@@ -491,6 +509,9 @@ void dt_preview_window_spawn(const int32_t imgid)
   g_signal_connect(G_OBJECT(dialog), "map-event", G_CALLBACK(_preview_map_event), preview);
   preview->main_configure_handler =
       g_signal_connect(dt_gui_main_window(), "configure-event", G_CALLBACK(_preview_main_configure_event), preview);
+  preview->center_allocate_handler = g_signal_connect(dt_ui_center_base(dt_gui_get_ui()), "size-allocate",
+                                                      G_CALLBACK(_preview_center_size_allocate), preview);
+  _preview_follow_center(preview); // baseline, so the very first change already moves the preview
   _preview_windows = g_list_append(_preview_windows, preview);
 #ifdef GDK_WINDOWING_WIN32
   g_signal_connect(gtk_widget_get_display(dialog), "monitor-added", G_CALLBACK(_preview_monitor_added), preview);
