@@ -408,4 +408,27 @@ is now the toggle button's text, which costs none. A list that repeats a widget 
 Windows shows its icons as text, or draws them in a `draw` handler, never as one `GtkImage` per
 row.
 
+## The floating preview window: geometry and monitor unplug (Windows)
+
+Established 2026-10-30 against `0faff147e8` on Windows, from a `[PVDBG]` log of `window-state-event`
+and `monitor-removed` while unplugging and replugging an external monitor
+(`src/gui/dtgtk/preview_window.c`).
+
+- **Plain `GtkWindow`, not a `GtkDialog`**, to get the maximize/restore button. On Windows that is one
+  button: it shows "restore" only while maximized, so a window resized by hand has none.
+- **No minimize button on Windows.** `gdk_window_set_functions()` is called in `map-event`, after GTK has
+  computed the native style. Setting `WS_MINIMIZEBOX` by hand before mapping is lost, and made the restore
+  button disappear. A `window-state-event` handler deiconifies the window if the taskbar or Win+D minimizes it.
+- **New previews** open at the last restored (non-maximized) position and size, never maximized: the
+  maximized state is not remembered. The first one is 420x420, centered over the main window.
+- **Unplugging a monitor.** The OS rearranges the remaining monitors' geometry and moves windows
+  *before* `monitor-removed`, so previews remember their current and previous `GdkMonitor` *pointers*
+  (geometry cannot be compared). Every preview that sat on the removed monitor is reopened as a *new*
+  window, 420x420, centered over the main window, on top of the others. Moving the existing window instead
+  made Windows restore its placement on the external monitor at replug, step by step, for over a second.
+- **Windows minimizes Ansel itself** on a monitor change (`state` flags `0x3` then `0x1`, which hides the
+  owned previews). The idle callback therefore calls `gtk_window_present()` on the main window, on unplug
+  and on replug. Destroying/reopening from inside the signal did not work: the work is deferred to an idle.
+- Previews on the other monitor are left where they are, and nothing moves back at replug.
+
 ---
