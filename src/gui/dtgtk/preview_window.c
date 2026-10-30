@@ -53,6 +53,10 @@ typedef struct dt_preview_window_t
   gboolean placed; // initial placement done: geometry changes now come from the user
   gboolean has_position; // restore_x/y were taken from the saved geometry at creation
   int restore_x, restore_y; // kept here: other previews' configure events rewrite the saved geometry meanwhile
+  gboolean maximized;
+  gboolean main_position_valid;
+  int main_x, main_y;
+  gulong main_configure_handler;
   GdkMonitor *monitor; // the monitor this window currently sits on (identity only, never dereferenced once gone)
   gboolean evacuate; // its monitor was unplugged: to be reopened on the main monitor
   GdkMonitor *previous_monitor; // the one before, as the OS may have moved us away from an unplugged one
@@ -63,11 +67,12 @@ void _preview_redraw(gpointer instance, dt_preview_window_t *preview);
 typedef struct dt_preview_geometry_t
 {
   gboolean valid;
+  gboolean maximized;
   int x, y, width, height;
   GdkRectangle monitor; // geometry of the monitor the window was saved on
 } dt_preview_geometry_t;
 
-/** Last restored (non-maximized) geometry of any preview this session, reused by the next ones. */
+/** Last geometry and state of any preview this session, reused by the next ones. */
 static dt_preview_geometry_t _preview_last = { 0 };
 
 /**
@@ -87,20 +92,26 @@ static gboolean _preview_monitor_connected(GdkDisplay *display, const dt_preview
 }
 
 /**
- * @brief Make the saved geometry a default-size preview centered over the main window,
+ * @brief Make the saved geometry a default-size preview centered over the lighttable,
  * as on a first preview. Every preview sent back from an unplugged monitor gets this same geometry.
  */
 static void _preview_center_last(void)
 {
   GtkWidget *main_window = dt_gui_main_window();
+  GtkWidget *center = dt_gui_center_widget();
   GdkWindow *main_gdk_window = gtk_widget_get_window(main_window);
   int main_x = 0, main_y = 0;
+  int center_x = 0, center_y = 0;
   gdk_window_get_origin(main_gdk_window, &main_x, &main_y);
+  gtk_widget_translate_coordinates(center, main_window, 0, 0, &center_x, &center_y);
 
   _preview_last.width = 420;
   _preview_last.height = 420;
-  _preview_last.x = main_x + (gtk_widget_get_allocated_width(main_window) - _preview_last.width) / 2;
-  _preview_last.y = main_y + (gtk_widget_get_allocated_height(main_window) - _preview_last.height) / 2;
+  _preview_last.maximized = FALSE;
+  _preview_last.x = main_x + center_x
+                  + (gtk_widget_get_allocated_width(center) - _preview_last.width) / 2;
+  _preview_last.y = main_y + center_y
+                  + (gtk_widget_get_allocated_height(center) - _preview_last.height) / 2;
   gdk_monitor_get_geometry(gdk_display_get_monitor_at_window(gdk_window_get_display(main_gdk_window), main_gdk_window),
                            &_preview_last.monitor);
   _preview_last.valid = TRUE;
@@ -111,7 +122,7 @@ static GList *_preview_windows = NULL;
 static guint _preview_evacuate_source = 0;
 
 /**
- * @brief Reopen every marked preview as a new window, centered over the main window at the default size.
+ * @brief Reopen every marked preview as a new window, centered over the lighttable at the default size.
  * Moving the existing windows instead let the OS restore their placement on the external monitor when it
  * is plugged back in, slowly. Done from an idle callback, once, and not from the monitor signal, because
  * destroying windows while the OS is rearranging them minimized Ansel. Each new window is opened before
@@ -169,6 +180,8 @@ static void _preview_window_destroy(GtkWidget *dialog, gpointer user_data)
   // (e.g. moving the border-size slider).
   DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_preview_redraw), preview);
   g_signal_handlers_disconnect_by_data(gtk_widget_get_display(dialog), preview);
+  if(preview->main_configure_handler != 0)
+    g_signal_handler_disconnect(dt_gui_main_window(), preview->main_configure_handler);
   _preview_windows = g_list_remove(_preview_windows, preview);
   dt_view_image_surface_fetcher_cleanup(&preview->fetcher);
   dt_free(preview);
@@ -193,8 +206,49 @@ static gboolean _preview_key_press_event(GtkWidget *window, GdkEventKey *event, 
 }
 
 /**
- * @brief Remember the restored geometry, so that the next previews open the same way.
- * Maximized and fullscreen states are skipped: their size is not the restored one.
+ * @brief Move the preview with Ansel while preserving its offset from the main window.
+ * The preview is a separate toplevel, so window-manager transient ownership alone does not
+ * move it when the parent is dragged. A preview on another monitor is independent and is
+ * deliberately left in place.
+ */
+static gboolean _preview_main_configure_event(GtkWidget *main_window, GdkEventConfigure *event, gpointer user_data)
+{
+  dt_preview_window_t *preview = (dt_preview_window_t *)user_data;
+  GdkWindow *main_gdk_window = gtk_widget_get_window(main_window);
+  if(IS_NULL_PTR(main_gdk_window)) return FALSE;
+
+  int main_x = 0, main_y = 0;
+  gdk_window_get_origin(main_gdk_window, &main_x, &main_y);
+  if(!preview->main_position_valid)
+  {
+    preview->main_x = main_x;
+    preview->main_y = main_y;
+    preview->main_position_valid = TRUE;
+    return FALSE;
+  }
+
+  const int delta_x = main_x - preview->main_x;
+  const int delta_y = main_y - preview->main_y;
+  preview->main_x = main_x;
+  preview->main_y = main_y;
+  if(!preview->placed || preview->evacuate || (delta_x == 0 && delta_y == 0)) return FALSE;
+
+  GdkWindow *preview_gdk_window = gtk_widget_get_window(preview->window);
+  if(IS_NULL_PTR(preview_gdk_window)) return FALSE;
+  GdkDisplay *display = gtk_widget_get_display(main_window);
+  GdkMonitor *main_monitor = gdk_display_get_monitor_at_window(display, main_gdk_window);
+  GdkMonitor *preview_monitor = gdk_display_get_monitor_at_window(display, preview_gdk_window);
+  if(main_monitor != preview_monitor) return FALSE;
+
+  int preview_x = 0, preview_y = 0;
+  gtk_window_get_position(GTK_WINDOW(preview->window), &preview_x, &preview_y);
+  gtk_window_move(GTK_WINDOW(preview->window), preview_x + delta_x, preview_y + delta_y);
+  return FALSE;
+}
+
+/**
+ * @brief Remember the geometry and maximized state, so that the next previews open the same way.
+ * Fullscreen is skipped: it is a display state rather than a preview window layout.
  */
 static gboolean _preview_configure_event(GtkWidget *window, GdkEventConfigure *event, gpointer user_data)
 {
@@ -209,7 +263,9 @@ static gboolean _preview_configure_event(GtkWidget *window, GdkEventConfigure *e
     preview->previous_monitor = preview->monitor;
     preview->monitor = monitor;
   }
-  if(gdk_window_get_state(gdk_window) & (GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN)) return FALSE;
+  const GdkWindowState state = gdk_window_get_state(gdk_window);
+  if(state & GDK_WINDOW_STATE_FULLSCREEN) return FALSE;
+  _preview_last.maximized = (state & GDK_WINDOW_STATE_MAXIMIZED) != 0;
 
   gdk_monitor_get_geometry(monitor, &_preview_last.monitor);
   gtk_window_get_position(GTK_WINDOW(window), &_preview_last.x, &_preview_last.y);
@@ -220,18 +276,18 @@ static gboolean _preview_configure_event(GtkWidget *window, GdkEventConfigure *e
 }
 
 /** @brief On Windows, keep the preview from being minimized by the taskbar or Win+D. */
+#ifdef GDK_WINDOWING_WIN32
 static gboolean _preview_window_state_event(GtkWidget *window, GdkEventWindowState *event, gpointer user_data)
 {
-#ifdef GDK_WINDOWING_WIN32
   // The minimize box is removed on map, but the taskbar and Win+D can still iconify the window.
   if(event->new_window_state & GDK_WINDOW_STATE_ICONIFIED)
   {
     gtk_window_deiconify(GTK_WINDOW(window));
     return TRUE;
   }
-#endif
   return FALSE;
 }
+#endif
 
 /**
  * @brief Once mapped, re-apply the restored position (some window managers ignore the pre-map request)
@@ -249,6 +305,8 @@ static void _preview_map_event(GtkWidget *window, GdkEvent *event, gpointer user
 #endif
   if(!preview->placed && preview->has_position)
     gtk_window_move(GTK_WINDOW(window), preview->restore_x, preview->restore_y);
+  if(!preview->placed && preview->maximized)
+    gtk_window_maximize(GTK_WINDOW(window));
   preview->placed = TRUE;
 }
 
@@ -383,15 +441,14 @@ void dt_preview_window_spawn(const int32_t imgid)
   gtk_window_set_skip_taskbar_hint(GTK_WINDOW(dialog), TRUE);
 
   // A saved position on a monitor that is gone would be unreachable: start afresh.
-  if(_preview_last.valid && !_preview_monitor_connected(gtk_widget_get_display(dialog), &_preview_last))
+  if(!_preview_last.valid
+     || !_preview_monitor_connected(gtk_widget_get_display(dialog), &_preview_last))
     _preview_center_last();
 
-  // Without a restored position, the window manager centers it over the main window.
-  if(!_preview_last.valid)
-    gtk_window_set_position(GTK_WINDOW(dialog), GTK_WIN_POS_CENTER_ON_PARENT);
   preview->has_position = _preview_last.valid;
   preview->restore_x = _preview_last.x;
   preview->restore_y = _preview_last.y;
+  preview->maximized = _preview_last.maximized;
   gtk_window_set_default_size(GTK_WINDOW(dialog), _preview_last.valid ? _preview_last.width : 420,
                               _preview_last.valid ? _preview_last.height : 420);
 
@@ -399,8 +456,12 @@ void dt_preview_window_spawn(const int32_t imgid)
   g_signal_connect(G_OBJECT(dialog), "delete-event", G_CALLBACK(_preview_delete_event), preview);
   g_signal_connect(G_OBJECT(dialog), "key-press-event", G_CALLBACK(_preview_key_press_event), preview);
   g_signal_connect(G_OBJECT(dialog), "configure-event", G_CALLBACK(_preview_configure_event), preview);
+#ifdef GDK_WINDOWING_WIN32
   g_signal_connect(G_OBJECT(dialog), "window-state-event", G_CALLBACK(_preview_window_state_event), preview);
+#endif
   g_signal_connect(G_OBJECT(dialog), "map-event", G_CALLBACK(_preview_map_event), preview);
+  preview->main_configure_handler =
+      g_signal_connect(dt_gui_main_window(), "configure-event", G_CALLBACK(_preview_main_configure_event), preview);
   _preview_windows = g_list_append(_preview_windows, preview);
 #ifdef GDK_WINDOWING_WIN32
   g_signal_connect(gtk_widget_get_display(dialog), "monitor-added", G_CALLBACK(_preview_monitor_added), preview);

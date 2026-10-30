@@ -419,8 +419,10 @@ and `monitor-removed` while unplugging and replugging an external monitor
 - **No minimize button on Windows.** `gdk_window_set_functions()` is called in `map-event`, after GTK has
   computed the native style. Setting `WS_MINIMIZEBOX` by hand before mapping is lost, and made the restore
   button disappear. A `window-state-event` handler deiconifies the window if the taskbar or Win+D minimizes it.
-- **New previews** open at the last restored (non-maximized) position and size, never maximized: the
-  maximized state is not remembered. The first one is 420x420, centered over the main window.
+- **New previews** open at the last restored position and size, and restore the maximized state on
+  the monitor where they were last saved. The first one is 420x420, centered over the lighttable.
+- **Moving Ansel** moves an open preview by the same displacement only while both windows are on
+  the same monitor. A preview on an external monitor remains independent.
 - **Unplugging a monitor.** The OS rearranges the remaining monitors' geometry and moves windows
   *before* `monitor-removed`, so previews remember their current and previous `GdkMonitor` *pointers*
   (geometry cannot be compared). Every preview that sat on the removed monitor is reopened as a *new*
