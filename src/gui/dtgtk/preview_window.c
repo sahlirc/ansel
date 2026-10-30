@@ -28,6 +28,7 @@
 #include "common/times.h"
 #include "control/signal.h"
 #include "gui/application.h"
+#include "gui/window_manager.h"
 #include "control/control.h"
 #include "control/user_message.h"
 #include "caches/image_cache.h"
@@ -99,7 +100,8 @@ static gboolean _preview_monitor_connected(GdkDisplay *display, const dt_preview
 static void _preview_center_last(void)
 {
   GtkWidget *main_window = dt_gui_main_window();
-  GtkWidget *center = dt_gui_center_widget();
+  // Not dt_gui_center_widget(): the lighttable hides it, so its allocation is empty or stale there.
+  GtkWidget *center = dt_ui_center_base(dt_gui_get_ui());
   GdkWindow *main_gdk_window = gtk_widget_get_window(main_window);
   int main_x = 0, main_y = 0;
   int center_x = 0, center_y = 0;
