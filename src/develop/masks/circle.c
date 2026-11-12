@@ -109,7 +109,8 @@ static void _circle_get_distance(float x, float y, float as, dt_masks_form_gui_t
  */
 static void _circle_distance_cb(float pointer_x, float pointer_y, float cursor_radius,
                                 dt_masks_form_gui_t *mask_gui, int form_index, int node_count, int *inside,
-                                int *inside_border, int *near_handle, int *inside_source, float *dist, void *user_data)
+                                int *inside_border, int *near_handle, int *inside_source, float *dist,
+                                __attribute__((unused)) const void *user_data)
 {
   _circle_get_distance(pointer_x, pointer_y, cursor_radius, mask_gui, form_index, 0, inside,
                        inside_border, near_handle, inside_source, dist);
@@ -118,7 +119,7 @@ static void _circle_distance_cb(float pointer_x, float pointer_y, float cursor_r
 static int _find_closest_handle(dt_masks_form_t *mask_form, dt_masks_form_gui_t *mask_gui, int form_index)
 {
   return dt_masks_find_closest_handle_common(mask_form, mask_gui, form_index, 0,
-                                             NULL, NULL, NULL, _circle_distance_cb, NULL, NULL);
+                                             &(const dt_masks_hit_callbacks_t){ .distance = _circle_distance_cb });
 }
 
 static void _circle_get_creation_values(const dt_masks_form_t *form, float *radius, float *border)
@@ -564,15 +565,17 @@ static int _circle_get_points(dt_develop_t *dev, float x, float y, float radius,
   return 0;
 }
 
-static void _circle_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_form_gui_t *gui, int index, int num_points)
+static void _circle_events_post_expose(cairo_t *cr, float zoom_scale,
+                                       __attribute__((unused)) const dt_masks_form_t *form,
+                                       dt_masks_form_gui_t *gui, int index, int num_points)
 {
   // add a preview when creating a circle
   // in creation mode
   if(gui->creation)
   {
-    dt_masks_form_t *form = dt_masks_get_visible_form(gui->dev);
+    dt_masks_form_t *creation_form = dt_masks_get_visible_form(gui->dev);
     dt_masks_preview_buffers_t preview;
-    if(_circle_get_creation_preview(form, gui, &preview)) return;
+    if(_circle_get_creation_preview(creation_form, gui, &preview)) return;
 
     dt_masks_draw_preview_shape(gui->dev, cr, zoom_scale, num_points, preview.points, preview.points_count,
                                 preview.border, preview.border_count,
@@ -580,7 +583,7 @@ static void _circle_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_f
                                 CAIRO_LINE_CAP_ROUND, FALSE, FALSE);
 
     // draw a cross where the source will be created
-    if(dt_masks_form_is_clone(form))
+    if(dt_masks_form_is_clone(creation_form))
     {
       dt_masks_draw_source_preview(cr, zoom_scale, gui, gui->pos[0], gui->pos[1], gui->pos[0], gui->pos[1], FALSE);
       dt_masks_draw_preview_shape(gui->dev, cr, zoom_scale, num_points, preview.source_points, preview.points_count,
@@ -620,15 +623,9 @@ static void _circle_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_f
 
 
 static dt_masks_raster_result_t _circle_get_points_border(dt_develop_t *dev, struct dt_masks_form_t *form,
-                                     float **points,
-                                     int *points_count, float **border, int *border_count,
-                                     dt_masks_skip_range_t **border_skips, int *border_skip_count,
-                                     int source,
-                                     const dt_iop_module_t *module)
+                                                          const dt_masks_outline_out_t *const out, int source,
+                                                          const dt_iop_module_t *module)
 {
-  if(!IS_NULL_PTR(border_skips)) *border_skips = NULL;
-  if(!IS_NULL_PTR(border_skip_count)) *border_skip_count = 0;
-
   /* No geometry to build an outline from: the outline is empty, which is a result, not a
    * failure. Reporting success here (as this did) told the caller to cache a NULL outline as
    * if it had been built. */
@@ -642,17 +639,19 @@ static dt_masks_raster_result_t _circle_get_points_border(dt_develop_t *dev, str
     float xs = form->source[0];
     float ys = form->source[1];
     return dt_masks_raster_from_status(
-        _circle_get_points_source(dev, x, y, xs, ys, circle->radius, circle->radius, 0.0f, points, points_count, module));
+        _circle_get_points_source(dev, x, y, xs, ys, circle->radius, circle->radius, 0.0f, out->points, out->points_count,
+                                  module));
   }
   else
   {
-    if(form->functions->get_points(dev, x, y, circle->radius, circle->radius, 0, points, points_count) != 0)
+    if(form->functions->get_points(dev, x, y, circle->radius, circle->radius, 0, out->points, out->points_count)
+       != 0)
       return DT_MASKS_RASTER_ERROR;
-    if(!IS_NULL_PTR(border))
+    if(!IS_NULL_PTR(out->border))
     {
       float outer_radius = circle->radius + circle->border;
-      return dt_masks_raster_from_status(
-          form->functions->get_points(dev, x, y, outer_radius, outer_radius, 0, border, border_count));
+      return dt_masks_raster_from_status(form->functions->get_points(dev, x, y, outer_radius, outer_radius, 0,
+                                                                     out->border, out->border_count));
     }
     return DT_MASKS_RASTER_OK;
   }

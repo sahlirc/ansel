@@ -69,12 +69,22 @@ typedef struct dt_masks_form_gui_points_t
   // every shape whose border cannot fold over itself (all but polygon today).
   dt_masks_skip_range_t *border_skips;
   int border_skip_count;
+  // Where a brush's fading starts: the edge of the part it paints at full density, closed loops
+  // one after the other, a zero-length break starting each but the first (dt_masks_solid_edge()).
+  // NULL for every other shape: its outline is that edge.
+  float *fading;
+  int fading_count;
+  dt_masks_skip_range_t *fading_breaks;
+  int fading_break_count;
   float *source;   // source point in absolute coordinates in output image space
   int source_count;
   gboolean clockwise;
   /* The box every sample above spans -- points, border and source alike, in the same space --
-   * so a hit test can answer "nothing here" without walking them: minx, maxx, miny, maxy; empty
-   * (min above max) when there is no sample. dt_masks_gui_points_update_bbox() fills it. */
+   * and the shape's own box carried onto its source, where a source may be drawn as large as
+   * the border: a hit test answers "nothing here" without walking the samples, and the overlay
+   * bounds what it paints. A point that is not finite -- the separator between a gradient's two
+   * curves -- is no sample. minx, maxx, miny, maxy; empty (min above max) when there is no
+   * sample. dt_masks_gui_points_update_bbox() fills it. */
   float bbox[4];
 } dt_masks_form_gui_points_t;
 
@@ -146,6 +156,10 @@ typedef struct dt_masks_form_gui_t
   gboolean handle_selected;   // this is the state of the handle referenced by handle_hovered
   gboolean seg_selected;      // this is the state of the segment referenced by segment_hovered
   gboolean handle_border_selected; // this is the state of the border handle referenced by handle_border_hovered
+  // TRUE when the border handle under the cursor, selected or dragged is the one on the edge of a
+  // brush node's solid part rather than on its whole radius. Set by the hit test with
+  // handle_border_hovered, and kept through a drag.
+  gboolean handle_border_solid;
   int node_selected_idx;      // stable selected node index, distinct from current hover
 
   gboolean form_selected;
@@ -576,9 +590,15 @@ gboolean dt_masks_node_is_cusp(const dt_masks_form_gui_points_t *gpt, const int 
  */
 void dt_masks_draw_source(cairo_t *cr, dt_masks_form_gui_t *gui, const int index, const int nb, 
   const float zoom_scale, struct dt_masks_gui_center_point_t *center_point, const shape_draw_function_t *draw_shape_func);
+/**
+ * @brief Stroke a shape's path one node-to-node segment at a time.
+ *
+ * @param centreline TRUE for a brush's centreline: an open path, dotted. FALSE for a closed
+ * outline, solid.
+ */
 void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *gui, const int index, const float *points,
                                    const int points_count, const int node_count, const float zoom_scale,
-                                   const gboolean round_ends);
+                                   const gboolean centreline);
 
 /**
  * @brief How the overlay maps image coordinates onto its cairo target.
@@ -902,21 +922,21 @@ gboolean dt_masks_point_is_within_radius(const float px, const float py,
  * @return TRUE if the handle is valid and written to (handle_x, handle_y).
  */
 typedef gboolean (*dt_masks_border_handle_fn)(const dt_masks_form_gui_points_t *gui_points, int node_count,
-                                              int node_index, float *handle_x, float *handle_y, void *user_data);
+                                              int node_index, float *handle_x, float *handle_y, const void *user_data);
 /**
  * @brief Shape-specific callback to fetch a node's curve handle in GUI space.
  *
  * The handle is only queried for non-cusp nodes; implementations may assume that.
  */
 typedef void (*dt_masks_curve_handle_fn)(const dt_masks_form_gui_points_t *gui_points, int node_index,
-                                         float *handle_x, float *handle_y, void *user_data);
+                                         float *handle_x, float *handle_y, const void *user_data);
 /**
  * @brief Shape-specific callback to fetch a node's position in GUI space.
  *
  * When NULL, the common helper assumes Bezier-like layout at points[k*6+2].
  */
 typedef void (*dt_masks_node_position_fn)(const dt_masks_form_gui_points_t *gui_points, int node_index,
-                                          float *node_x, float *node_y, void *user_data);
+                                          float *node_x, float *node_y, const void *user_data);
 /**
  * @brief Shape-specific callback for inside/border/segment hit testing.
  *
@@ -926,12 +946,28 @@ typedef void (*dt_masks_node_position_fn)(const dt_masks_form_gui_points_t *gui_
 typedef void (*dt_masks_distance_fn)(float pointer_x, float pointer_y, float cursor_radius,
                                      dt_masks_form_gui_t *mask_gui, int form_index, int node_count,
                                      int *inside, int *inside_border, int *near_handle, int *inside_source, float *dist,
-                                     void *user_data);
+                                     const void *user_data);
 /**
  * @brief Optional hook to customize selection flags after inside/border/source resolution.
  */
 typedef void (*dt_masks_post_select_fn)(dt_masks_form_gui_t *mask_gui, int inside, int inside_border,
-                                        int inside_source, void *user_data);
+                                        int inside_source, const void *user_data);
+
+/**
+ * @brief The shape-specific half of dt_masks_find_closest_handle_common(). Any member may be NULL.
+ */
+typedef struct dt_masks_hit_callbacks_t
+{
+  dt_masks_border_handle_fn border_handle; // the selected node's border handle
+  // The selected node's handle on the edge of its solid part (a brush's), tested after the node
+  // itself. It is a border handle too, told apart by mask_gui->handle_border_solid.
+  dt_masks_border_handle_fn solid_handle;
+  dt_masks_curve_handle_fn curve_handle;
+  dt_masks_node_position_fn node_position;
+  dt_masks_distance_fn distance;
+  dt_masks_post_select_fn post_select;
+  const void *user_data; // passed to every callback
+} dt_masks_hit_callbacks_t;
 
 /**
  * @brief Shared selection logic for node/handle/segment hit testing.
@@ -943,12 +979,7 @@ typedef void (*dt_masks_post_select_fn)(dt_masks_form_gui_t *mask_gui, int insid
  */
 int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form, dt_masks_form_gui_t *mask_gui,
                                         int form_index, int node_count_override,
-                                        dt_masks_border_handle_fn border_handle_cb,
-                                        dt_masks_curve_handle_fn curve_handle_cb,
-                                        dt_masks_node_position_fn node_position_cb,
-                                        dt_masks_distance_fn distance_cb,
-                                        dt_masks_post_select_fn post_select_cb,
-                                        void *user_data);
+                                        const dt_masks_hit_callbacks_t *callbacks);
 
 void dt_masks_creation_mode_quit(dt_masks_form_gui_t *gui);
 gboolean dt_masks_creation_mode_enter(dt_develop_t *dev, dt_iop_module_t *module, const dt_masks_type_t type);

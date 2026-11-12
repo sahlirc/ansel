@@ -415,15 +415,9 @@ static int _ellipse_get_points(dt_develop_t *dev, float xx, float yy, float radi
 }
 
 static dt_masks_raster_result_t _ellipse_get_points_border(dt_develop_t *dev, struct dt_masks_form_t *form,
-                                      float **points,
-                                      int *points_count, float **border, int *border_count,
-                                      dt_masks_skip_range_t **border_skips, int *border_skip_count,
-                                      int source,
-                                      const dt_iop_module_t *module)
+                                                           const dt_masks_outline_out_t *const out, int source,
+                                                           const dt_iop_module_t *module)
 {
-  if(!IS_NULL_PTR(border_skips)) *border_skips = NULL;
-  if(!IS_NULL_PTR(border_skip_count)) *border_skip_count = 0;
-
   // No geometry: an empty outline is the correct result here, not a failure. See the circle.
   if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
   dt_masks_node_ellipse_t *ellipse = (dt_masks_node_ellipse_t *)((form->points)->data);
@@ -436,19 +430,20 @@ static dt_masks_raster_result_t _ellipse_get_points_border(dt_develop_t *dev, st
   {
     float xs = form->source[0], ys = form->source[1];
     return dt_masks_raster_from_status(
-        _ellipse_get_points_source(dev, x, y, xs, ys, a, b, ellipse->rotation, points, points_count, module));
+        _ellipse_get_points_source(dev, x, y, xs, ys, a, b, ellipse->rotation, out->points, out->points_count,
+                                   module));
   }
   else
   {
-    if(_ellipse_get_points(dev, x, y, a, b, ellipse->rotation, points, points_count) != 0)
+    if(_ellipse_get_points(dev, x, y, a, b, ellipse->rotation, out->points, out->points_count) != 0)
       return DT_MASKS_RASTER_ERROR;
-    if(!IS_NULL_PTR(border))
+    if(!IS_NULL_PTR(out->border))
     {
       const int prop = ellipse->flags & DT_MASKS_ELLIPSE_PROPORTIONAL;
       return dt_masks_raster_from_status(
           _ellipse_get_points(dev, x, y, (prop ? a * (1.0f + ellipse->border) : a + ellipse->border),
                               (prop ? b * (1.0f + ellipse->border) : b + ellipse->border), ellipse->rotation,
-                              border, border_count));
+                              out->border, out->border_count));
     }
     return DT_MASKS_RASTER_OK;
   }
@@ -461,7 +456,7 @@ static dt_masks_raster_result_t _ellipse_get_points_border(dt_develop_t *dev, st
  * transform logic used in the original hit testing.
  */
 static void _ellipse_node_position_cb(const dt_masks_form_gui_points_t *gui_points, int node_index,
-                                      float *node_x, float *node_y, void *user_data)
+                                      float *node_x, float *node_y, __attribute__((unused)) const void *user_data)
 {
   const float *nodes = gui_points->points;
   const float rotation = atan2f(nodes[3] - nodes[1], nodes[2] - nodes[0]);
@@ -476,7 +471,8 @@ static void _ellipse_node_position_cb(const dt_masks_form_gui_points_t *gui_poin
  */
 static void _ellipse_distance_cb(float pointer_x, float pointer_y, float cursor_radius,
                                  dt_masks_form_gui_t *mask_gui, int form_index, int node_count, int *inside,
-                                 int *inside_border, int *near_handle, int *inside_source, float *dist, void *user_data)
+                                 int *inside_border, int *near_handle, int *inside_source, float *dist,
+                                 __attribute__((unused)) const void *user_data)
 {
   _ellipse_get_distance(pointer_x, pointer_y, cursor_radius, mask_gui, form_index, 0, inside,
                         inside_border, near_handle, inside_source, dist);
@@ -487,8 +483,9 @@ static void _ellipse_distance_cb(float pointer_x, float pointer_y, float cursor_
  *
  * Ellipse uses the border hit to arm the pivot interaction.
  */
-static void _ellipse_post_select_cb(dt_masks_form_gui_t *mask_gui, int inside, int inside_border,
-                                    int inside_source, void *user_data)
+static void _ellipse_post_select_cb(dt_masks_form_gui_t *mask_gui, __attribute__((unused)) int inside,
+                                    int inside_border, __attribute__((unused)) int inside_source,
+                                    __attribute__((unused)) const void *user_data)
 {
   mask_gui->pivot_selected = inside_border ? TRUE : FALSE; // cast to strict gboolean
 }
@@ -497,8 +494,10 @@ static int _find_closest_handle(dt_masks_form_t *mask_form, dt_masks_form_gui_t 
 {
   if(mask_gui) mask_gui->pivot_selected = FALSE;
   return dt_masks_find_closest_handle_common(mask_form, mask_gui, form_index, 5,
-                                             NULL, NULL, _ellipse_node_position_cb,
-                                             _ellipse_distance_cb, _ellipse_post_select_cb, NULL);
+                                             &(const dt_masks_hit_callbacks_t){
+                                                 .node_position = _ellipse_node_position_cb,
+                                                 .distance = _ellipse_distance_cb,
+                                                 .post_select = _ellipse_post_select_cb });
 }
 
 static int _init_fading(dt_masks_form_t *form, const float amount, const dt_masks_increment_t increment, const int flow)
@@ -1015,16 +1014,17 @@ static void _ellipse_draw_handles(const dt_masks_form_gui_t *gui, cairo_t *cr, c
   }
 }
 
-static void _ellipse_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_form_gui_t *gui, int index,
-                                        int num_points)
+static void _ellipse_events_post_expose(cairo_t *cr, float zoom_scale,
+                                        __attribute__((unused)) const dt_masks_form_t *form,
+                                        dt_masks_form_gui_t *gui, int index, int num_points)
 {
   // add a preview when creating an ellipse
   // in creation mode
   if(gui->creation)
   {
-    dt_masks_form_t *form = dt_masks_get_visible_form(gui->dev);
+    dt_masks_form_t *creation_form = dt_masks_get_visible_form(gui->dev);
     dt_masks_preview_buffers_t preview;
-    if(_ellipse_get_creation_preview(form, gui, &preview)) return;
+    if(_ellipse_get_creation_preview(creation_form, gui, &preview)) return;
 
     dt_masks_draw_preview_shape(gui->dev, cr, zoom_scale, num_points, preview.points, preview.points_count,
                                 preview.border, preview.border_count,
@@ -1033,7 +1033,7 @@ static void _ellipse_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_
 
 
     // draw a cross where the source will be created
-    if(dt_masks_form_is_clone(form))
+    if(dt_masks_form_is_clone(creation_form))
     {
       dt_masks_draw_source_preview(cr, zoom_scale, gui, gui->pos[0], gui->pos[1], gui->pos[0], gui->pos[1], FALSE);
       dt_masks_draw_preview_shape(gui->dev, cr, zoom_scale, num_points, preview.source_points, preview.points_count,

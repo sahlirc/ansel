@@ -40,6 +40,7 @@
 #include "develop/masks_group.h"
 #include "develop/masks/masks_distort.h"
 #include "develop/masks/masks_functions.h"
+#include "develop/masks/masks_solid.h"
 #include "widgets/stroke_raster.h"
 #include "widgets/bauhaus.h"
 #include "common/conf.h"
@@ -1182,12 +1183,7 @@ gboolean dt_masks_point_is_within_radius(const float point_x, const float point_
  */
 int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
                                         dt_masks_form_gui_t *mask_gui, int form_index, int node_count_override,
-                                        dt_masks_border_handle_fn border_handle_cb,
-                                        dt_masks_curve_handle_fn curve_handle_cb,
-                                        dt_masks_node_position_fn node_position_cb,
-                                        dt_masks_distance_fn distance_cb,
-                                        dt_masks_post_select_fn post_select_cb,
-                                        void *user_data)
+                                        const dt_masks_hit_callbacks_t *callbacks)
 {
   if(IS_NULL_PTR(mask_form) || IS_NULL_PTR(mask_form->points)) return 0;
   if(!mask_gui->creation && mask_gui->group_selected != form_index) return 0;
@@ -1235,12 +1231,13 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
     mask_gui->seg_hovered = mask_gui->seg_dragging;
     return 1;
   }
+  mask_gui->handle_border_solid = FALSE;
 
   const int node_count = (node_count_override >= 0) ? node_count_override
                                                     : (int)g_list_length(mask_form->points);
 
   const gboolean has_bezier_layout = mask_form->uses_bezier_points_layout;
-  const gboolean can_test_nodes = (!IS_NULL_PTR(node_position_cb)) || has_bezier_layout;
+  const gboolean can_test_nodes = (!IS_NULL_PTR(callbacks->node_position)) || has_bezier_layout;
   const int first_node_index = has_bezier_layout ? 0 : 1; // skip center node for non-bezier shapes
   const gboolean has_selected_node = (node_count > 0) && can_test_nodes
                                      && (mask_gui->group_selected == form_index)
@@ -1251,8 +1248,8 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
     // Current node's border handle (feather handle).
     float handle_x = NAN;
     float handle_y = NAN;
-    if(border_handle_cb
-       && border_handle_cb(gui_points, node_count, selected_node, &handle_x, &handle_y, user_data)
+    if(callbacks->border_handle
+       && callbacks->border_handle(gui_points, node_count, selected_node, &handle_x, &handle_y, callbacks->user_data)
        && dt_masks_point_is_within_radius(cursor_x, cursor_y, handle_x, handle_y, cursor_radius2))
     {
       mask_gui->handle_border_hovered = selected_node;
@@ -1260,9 +1257,9 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
     }
 
     // Current node's curve handle.
-    if(!dt_masks_node_is_cusp(gui_points, selected_node) && curve_handle_cb)
+    if(!dt_masks_node_is_cusp(gui_points, selected_node) && callbacks->curve_handle)
     {
-      curve_handle_cb(gui_points, selected_node, &handle_x, &handle_y, user_data);
+      callbacks->curve_handle(gui_points, selected_node, &handle_x, &handle_y, callbacks->user_data);
       if(dt_masks_point_is_within_radius(cursor_x, cursor_y, handle_x, handle_y, cursor_radius2))
       {
         mask_gui->handle_hovered = selected_node;
@@ -1273,9 +1270,9 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
     // Current node itself.
     float node_x = NAN;
     float node_y = NAN;
-    if(node_position_cb)
+    if(callbacks->node_position)
     {
-      node_position_cb(gui_points, selected_node, &node_x, &node_y, user_data);
+      callbacks->node_position(gui_points, selected_node, &node_x, &node_y, callbacks->user_data);
     }
     else if(has_bezier_layout)
     {
@@ -1288,6 +1285,17 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
       mask_gui->node_hovered = selected_node;
       return 1;
     }
+
+    // Current node's solid-part handle: after the node, which it covers on a node whose solid part
+    // is narrower than the cursor, and which would otherwise be out of reach.
+    if(callbacks->solid_handle
+       && callbacks->solid_handle(gui_points, node_count, selected_node, &handle_x, &handle_y, callbacks->user_data)
+       && dt_masks_point_is_within_radius(cursor_x, cursor_y, handle_x, handle_y, cursor_radius2))
+    {
+      mask_gui->handle_border_hovered = selected_node;
+      mask_gui->handle_border_solid = TRUE;
+      return 1;
+    }
   }
 
   if(can_test_nodes)
@@ -1296,9 +1304,9 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
     {
       float node_x = NAN;
       float node_y = NAN;
-      if(node_position_cb)
+      if(callbacks->node_position)
       {
-        node_position_cb(gui_points, node_index, &node_x, &node_y, user_data);
+        callbacks->node_position(gui_points, node_index, &node_x, &node_y, callbacks->user_data);
       }
       else if(has_bezier_layout)
       {
@@ -1314,7 +1322,7 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
     }
   }
 
-  if(IS_NULL_PTR(distance_cb)) return 0;
+  if(IS_NULL_PTR(callbacks->distance)) return 0;
 
   // Segment or shape hit tests.
   int inside = 0;
@@ -1322,22 +1330,22 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
   int near_segment = -1;
   int inside_source = 0;
   float nearest_distance = 0.0f;
-  distance_cb(cursor_x, cursor_y, cursor_radius, mask_gui, form_index, node_count, &inside, &inside_border,
-              &near_segment, &inside_source, &nearest_distance, user_data);
+  callbacks->distance(cursor_x, cursor_y, cursor_radius, mask_gui, form_index, node_count, &inside, &inside_border,
+                      &near_segment, &inside_source, &nearest_distance, callbacks->user_data);
 
 
   if(inside_source)
   {
     mask_gui->form_selected = TRUE;
     mask_gui->source_selected = TRUE;
-    if(post_select_cb) post_select_cb(mask_gui, inside, inside_border, inside_source, user_data);
+    if(callbacks->post_select) callbacks->post_select(mask_gui, inside, inside_border, inside_source, callbacks->user_data);
     return 1;
   }
   if(inside_border)
   {
     mask_gui->form_selected = TRUE;
     mask_gui->border_selected = TRUE;
-    if(post_select_cb) post_select_cb(mask_gui, inside, inside_border, inside_source, user_data);
+    if(callbacks->post_select) callbacks->post_select(mask_gui, inside, inside_border, inside_source, callbacks->user_data);
     return 1;
   }
   if(near_segment >= 0)
@@ -1349,7 +1357,7 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form,
   if(inside)
   {
     mask_gui->form_selected = TRUE;
-    if(post_select_cb) post_select_cb(mask_gui, inside, inside_border, inside_source, user_data);
+    if(callbacks->post_select) callbacks->post_select(mask_gui, inside, inside_border, inside_source, callbacks->user_data);
     return 1;
   }
 
@@ -1790,12 +1798,17 @@ static gboolean _dt_masks_events_flush_rebuild_if_needed(struct dt_iop_module_t 
  *
  * Pitfall: set_hint_message() may rely on gui->form_selected, so we may need
  *          a temporary override when no hint is produced.
+ *
+ * The hint describes the form visible NOW, so it is read here and not taken from the caller:
+ * a shape's event handler may replace the visible form and free the old one (doc/masks-gui.md).
  */
-static gboolean _set_hinter_message(dt_masks_form_gui_t *mask_gui, const dt_masks_form_t *mask_form)
+static gboolean _set_hinter_message(dt_masks_form_gui_t *mask_gui)
 {
   // Sized for the longest hint once translated: a truncated message would also cut a Pango
   // markup tag in half, and dt_hinter_set_message() feeds the result to gtk_label_set_markup().
   char message[512] = "";
+
+  const dt_masks_form_t *mask_form = dt_masks_get_visible_form(mask_gui->dev);
 
   // Checked before use, not after: this function tests IS_NULL_PTR(mask_form) further down
   // and its own dt_print writes `mask_form ? mask_form->type : -1`, so a NULL was always
@@ -1932,10 +1945,16 @@ void dt_masks_gui_form_create(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
 
   dt_masks_form_gui_points_t *gui_points
       = (dt_masks_form_gui_points_t *)g_list_nth_data(mask_gui->points, form_index);
+  float *fading_contour = NULL;
+  const dt_masks_outline_out_t outline = { .points = &gui_points->points,
+                                           .points_count = &gui_points->points_count,
+                                           .border = &gui_points->border,
+                                           .border_count = &gui_points->border_count,
+                                           .border_skips = &gui_points->border_skips,
+                                           .border_skip_count = &gui_points->border_skip_count,
+                                           .fading = &fading_contour };
   const dt_masks_raster_result_t border_status
-      = dt_masks_get_points_border(mask_gui->dev, mask_form, &gui_points->points, &gui_points->points_count,
-                                   &gui_points->border, &gui_points->border_count,
-                                   &gui_points->border_skips, &gui_points->border_skip_count, 0, NULL);
+      = dt_masks_get_points_border(mask_gui->dev, mask_form, &outline, 0, NULL);
 
   /* Only a genuine FAILURE may leave the cache key unset, and it must: the key covers the whole
    * group, so one unstamped shape rebuilds every shape of the group on every later expose --
@@ -1953,13 +1972,24 @@ void dt_masks_gui_form_create(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
              " so every later expose rebuilds this whole group\n",
              mask_form->name, form_index, g_list_length(mask_form->points));
 
+  /* The contour on the spokes is not what the overlay draws: where the spokes lie along the spine,
+   * the edge of the solid part is made of their sides. That edge is traced from the contour. */
+  if(!IS_NULL_PTR(fading_contour))
+  {
+    if(dt_masks_solid_edge(gui_points, fading_contour, (int)g_list_length(mask_form->points) * 3,
+                           (float)dt_masks_gui_outline_step(mask_gui->dev)))
+      dt_print(DT_DEBUG_MASKS, "[masks] where the fading of %s starts could not be traced: out of memory\n",
+               mask_form->name);
+    dt_pixelpipe_cache_free_align(fading_contour);
+  }
+
   if(border_status != DT_MASKS_RASTER_ERROR)
   {
     if(border_status == DT_MASKS_RASTER_OK && (mask_form->type & DT_MASKS_CLONE))
     {
-      if(dt_masks_get_points_border(mask_gui->dev, mask_form, &gui_points->source, &gui_points->source_count,
-                                    NULL, NULL, NULL, NULL, TRUE, module)
-         != DT_MASKS_RASTER_OK)
+      const dt_masks_outline_out_t source = { .points = &gui_points->source,
+                                              .points_count = &gui_points->source_count };
+      if(dt_masks_get_points_border(mask_gui->dev, mask_form, &source, TRUE, module) != DT_MASKS_RASTER_OK)
         return;
     }
     dt_masks_gui_points_update_bbox(gui_points);
@@ -2279,11 +2309,11 @@ gboolean dt_masks_form_exit_creation(dt_iop_module_t *module, dt_masks_form_gui_
     dt_masks_creation_mode_quit(mask_gui);
 
     /* The user-facing ways to abandon a creation session all land here -- Esc, the right-click
-     * menu entry, backspace on a polygon with no node placed, the darkroom tearing down
-     * mid-creation -- and none of them told the shape toolbars, so a shape abandoned with Esc
-     * left its button pressed. Only the click-the-armed-button-again path deactivated, because
-     * it does so itself before calling us. Finishing a shape is NOT one of these: continuous
-     * creation deliberately keeps the tool armed for the next one.
+     * menu entry, backspace on a polygon with no node placed, an edit made off the canvas, the
+     * darkroom tearing down mid-creation -- and none of them told the shape toolbars, so a shape
+     * abandoned with Esc left its button pressed. Only the click-the-armed-button-again path
+     * deactivated, because it does so itself before calling us. Finishing a shape is NOT one of
+     * these: continuous creation deliberately keeps the tool armed for the next one.
      *
      * This is not the only place mask_gui->creation is cleared -- dt_masks_clear_form_gui()
      * does it too, so entering edit mode leaves creation through dt_masks_change_form_gui()
@@ -2411,6 +2441,7 @@ static void _gui_points_bbox_extend(float *const bbox, const float *const sample
   {
     const float x = samples[2 * i];
     const float y = samples[2 * i + 1];
+    if(!isfinite(x) || !isfinite(y)) continue;   /* a gradient's separator between its two curves */
     bbox[0] = fminf(bbox[0], x);
     bbox[1] = fmaxf(bbox[1], x);
     bbox[2] = fminf(bbox[2], y);
@@ -2427,7 +2458,21 @@ void dt_masks_gui_points_update_bbox(dt_masks_form_gui_points_t *gp)
   gp->bbox[3] = -FLT_MAX;
   if(!IS_NULL_PTR(gp->points)) _gui_points_bbox_extend(gp->bbox, gp->points, gp->points_count);
   if(!IS_NULL_PTR(gp->border)) _gui_points_bbox_extend(gp->bbox, gp->border, gp->border_count);
-  if(!IS_NULL_PTR(gp->source)) _gui_points_bbox_extend(gp->bbox, gp->source, gp->source_count);
+  if(IS_NULL_PTR(gp->source) || gp->source_count <= 0) return;
+
+  /* A source is its shape carried elsewhere, drawn at most as large as the shape's border: a
+   * brush too short to have a line draws its border there (doc/masks-geometry.md). That is the
+   * shape's box carried by the shift between the first points of the two outlines, which every
+   * shape puts at the same spot of both -- a circle's or an ellipse's centre, a path's first
+   * control point. Taken before the source's samples join the box, which would carry them too. */
+  if(!IS_NULL_PTR(gp->points) && gp->points_count > 0)
+  {
+    const float dx = gp->source[0] - gp->points[0];
+    const float dy = gp->source[1] - gp->points[1];
+    const float carried[4] = { gp->bbox[0] + dx, gp->bbox[2] + dy, gp->bbox[1] + dx, gp->bbox[3] + dy };
+    _gui_points_bbox_extend(gp->bbox, carried, 2);
+  }
+  _gui_points_bbox_extend(gp->bbox, gp->source, gp->source_count);
 }
 
 void dt_masks_gui_form_remove(dt_masks_form_t *mask_form, dt_masks_form_gui_t *mask_gui, int form_index)
@@ -2441,12 +2486,18 @@ void dt_masks_gui_form_remove(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
   {
     gui_points->points_count = gui_points->border_count = gui_points->source_count = 0;
     gui_points->border_skip_count = 0;
+    gui_points->fading_count = 0;
+    gui_points->fading_break_count = 0;
     dt_pixelpipe_cache_free_align(gui_points->points);
     gui_points->points = NULL;
     dt_pixelpipe_cache_free_align(gui_points->border);
     gui_points->border = NULL;
     dt_pixelpipe_cache_free_align(gui_points->border_skips);
     gui_points->border_skips = NULL;
+    dt_pixelpipe_cache_free_align(gui_points->fading);
+    gui_points->fading = NULL;
+    dt_pixelpipe_cache_free_align(gui_points->fading_breaks);
+    gui_points->fading_breaks = NULL;
     dt_pixelpipe_cache_free_align(gui_points->source);
     gui_points->source = NULL;
     dt_masks_gui_points_update_bbox(gui_points);   /* empty */
@@ -2600,7 +2651,10 @@ void dt_masks_gui_form_save_creation(dt_develop_t *develop, dt_iop_module_t *mod
     // we update module gui
 
     if(IS_NULL_PTR(mask_gui)) dt_iop_gui_blend_masks_update(module);
-    dt_dev_add_history_item(develop, module, TRUE, TRUE);
+    // Committed now rather than queued: dt_dev_add_history_item() ends the creation session
+    // this shape belongs to. The flush keeps the edits queued before it in their order.
+    dt_dev_history_flush_pending_commits(develop);
+    dt_dev_history_commit_item_now(develop, module, TRUE, FALSE);
   }
 
   if(!IS_NULL_PTR(mask_gui))
@@ -2887,17 +2941,10 @@ static int _dt_masks_events_mouse_moved(dt_develop_t *dev, struct dt_iop_module_
 
   if(!IS_NULL_PTR(mask_gui))
   {
-    // Re-read the visible form. dt_masks_cow_touch() above may have cloned it, spliced the
-    // clone into dev->forms in place of the original, re-pointed form_gui->form_visible at
-    // the clone and dropped the original's last reference -- freeing it. mask_form was
-    // captured BEFORE that call, so it can be dangling here; form_visible is the pointer the
-    // COW maintains.
-    //
-    // Sentry 143237622: SIGSEGV inside g_list_length() walking the freed points list, via
-    // _set_hinter_message() -> _polygon_set_hint_message(), on an ordinary darkroom
-    // mouse-move over a polygon.
-    mask_form = dt_masks_get_visible_form(dev);
-    if(!IS_NULL_PTR(mask_form)) _set_hinter_message(mask_gui, mask_form);
+    // The hint reads the visible form itself, never mask_form: dt_masks_cow_touch() above may
+    // have cloned the visible form and freed the original mask_form still points at (Sentry
+    // 143237622: SIGSEGV in _polygon_set_hint_message() walking the freed points list).
+    _set_hinter_message(mask_gui);
     _set_cursor_shape(mask_gui);
   }
   return result;
@@ -2922,13 +2969,6 @@ int dt_masks_events_button_released(dt_develop_t *dev, struct dt_iop_module_t *m
       = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
   dispatch_form = dt_masks_cow_touch(dev, dispatch_form);
 
-  // dt_masks_cow_touch() above may have cloned the visible form, spliced the clone into
-  // dev->forms in place of the original, re-pointed form_gui->form_visible at it and
-  // dropped the original's last reference -- freeing it. mask_form was captured before
-  // that call, so re-read what form_visible points at now rather than using a pointer
-  // that may already be dangling. Same defect as Sentry 143237622 in mouse_moved.
-  mask_form = dt_masks_get_visible_form(dev);
-
   int result = 0;
   if(!IS_NULL_PTR(dispatch_form) && dispatch_form->functions && dispatch_form->functions->button_released)
     result = dispatch_form->functions->button_released(module, x, y, button,
@@ -2937,6 +2977,10 @@ int dt_masks_events_button_released(dt_develop_t *dev, struct dt_iop_module_t *m
   if(_dt_masks_events_flush_rebuild_if_needed(module, dispatch_form, mask_gui, form_index, button))
     result = 1;
 
+  // Re-read the visible form: dt_masks_cow_touch() above may have cloned it and freed the
+  // original mask_form points at, and the shape's handler may have replaced it -- a creation
+  // session shows the next unfinished shape once one is saved (doc/masks-gui.md).
+  mask_form = dt_masks_get_visible_form(dev);
   if(!IS_NULL_PTR(mask_form) && (mask_form->type & DT_MASKS_GROUP) && !IS_NULL_PTR(mask_gui))
   {
     const dt_masks_form_group_t *selected_group_entry
@@ -2951,7 +2995,7 @@ int dt_masks_events_button_released(dt_develop_t *dev, struct dt_iop_module_t *m
 
   if(!IS_NULL_PTR(mask_gui))
   {
-    _set_hinter_message(mask_gui, mask_form);
+    _set_hinter_message(mask_gui);
     _set_cursor_shape(mask_gui);
   }
 
@@ -2993,6 +3037,12 @@ int dt_masks_events_button_pressed(dt_develop_t *dev, struct dt_iop_module_t *mo
   mask_form = dt_masks_get_visible_form(dev);
   _dt_masks_events_update_hover(dispatch_form, mask_gui, form_index);
 
+  // Read before the shape's handler, which may replace the visible form and free mask_form:
+  // finishing a shape in a creation session shows the next unfinished one (doc/masks-gui.md).
+  const gboolean shape_was_selected = (mask_form->type & DT_MASKS_GROUP)
+                                          ? (prev_group_selected >= 0 && prev_group_selected == form_index)
+                                          : prev_any_selected;
+
   gboolean return_val = FALSE;
   if(!IS_NULL_PTR(dispatch_form) && dispatch_form->functions && dispatch_form->functions->button_pressed)
     return_val = dispatch_form->functions->button_pressed(module, x, y, pressure,
@@ -3002,9 +3052,6 @@ int dt_masks_events_button_pressed(dt_develop_t *dev, struct dt_iop_module_t *mo
   // `dispatch_form` can pass NULL in case of deselection.
   dt_masks_select_form(dev, module, dispatch_form);
 
-  const gboolean shape_was_selected = (mask_form->type & DT_MASKS_GROUP)
-                                          ? (prev_group_selected >= 0 && prev_group_selected == form_index)
-                                          : prev_any_selected;
   _apply_gui_button_pressed_state(mask_gui, button, state, shape_was_selected);
 
   // Refresh hover/highlight state, the hint message and the cursor shape now that the click
@@ -3014,7 +3061,7 @@ int dt_masks_events_button_pressed(dt_develop_t *dev, struct dt_iop_module_t *mo
   // what the click just did on the next physical mouse move -- same class of staleness as
   // mouse_moved()/button_released(), which already refresh all three at their own tail.
   _dt_masks_events_update_hover(dispatch_form, mask_gui, form_index);
-  _set_hinter_message(mask_gui, mask_form);
+  _set_hinter_message(mask_gui);
   _set_cursor_shape(mask_gui);
 
   if(button == 3 && !return_val)
@@ -3241,13 +3288,6 @@ int dt_masks_events_mouse_scrolled(dt_develop_t *dev, struct dt_iop_module_t *mo
       = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
   dispatch_form = dt_masks_cow_touch(dev, dispatch_form);
 
-  // dt_masks_cow_touch() above may have cloned the visible form, spliced the clone into
-  // dev->forms in place of the original, re-pointed form_gui->form_visible at it and
-  // dropped the original's last reference -- freeing it. mask_form was captured before
-  // that call, so re-read what form_visible points at now rather than using a pointer
-  // that may already be dangling. Same defect as Sentry 143237622 in mouse_moved.
-  mask_form = dt_masks_get_visible_form(dev);
-
   if(!mask_gui->creation && !dt_masks_is_anything_selected(mask_gui))
     return 0;
 
@@ -3266,9 +3306,12 @@ int dt_masks_events_mouse_scrolled(dt_develop_t *dev, struct dt_iop_module_t *mo
                                                       key_state, dispatch_form, parent_id, mask_gui, form_index,
                                                       interaction);
 
+  // Re-read the visible form: mask_form may be freed by now, by dt_masks_cow_touch() above or
+  // by the shape's handler (doc/masks-gui.md).
+  mask_form = dt_masks_get_visible_form(dev);
   if(!IS_NULL_PTR(mask_gui))
   {
-    const gboolean hinted = _set_hinter_message(mask_gui, mask_form);
+    const gboolean hinted = _set_hinter_message(mask_gui);
     dt_print(DT_DEBUG_INPUT,
              "[masks] scroll: ret=%d hinted=%d form=%p type=%d gui=%p group_selected=%d flow=%d state=0x%x\n",
              result, hinted, (void *)mask_form, mask_form ? mask_form->type : -1, (void *)mask_gui,
@@ -3482,7 +3525,7 @@ void dt_masks_draw_source(cairo_t *cr, dt_masks_form_gui_t *mask_gui, const int 
 
 void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, const int form_index,
                                    const float *points, const int points_count, const int node_count,
-                                   const float zoom_scale, const gboolean round_ends)
+                                   const float zoom_scale, const gboolean centreline)
 {
   if(IS_NULL_PTR(cr) || IS_NULL_PTR(points) || IS_NULL_PTR(mask_gui)) return;
   if(node_count <= 0 || points_count <= node_count * 3 + 6) return;
@@ -3492,29 +3535,20 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
 
   const gboolean group_selected = (mask_gui->group_selected == form_index);
 
-  /* The last segment there is to draw. An OPEN path -- a brush, the only caller asking for round
-   * ends, since only an open path has two true ends -- has one segment fewer than it has nodes; a
-   * closed one also has the segment returning to node 0. A shape still being created has no
-   * closing segment either: the last one is the one the cursor is dragging. */
-  const int last_segment_index = (round_ends || mask_gui->creation) ? node_count - 2 : node_count - 1;
+  /* The last segment there is to draw. An OPEN path -- a brush's centreline -- has one segment
+   * fewer than it has nodes; a closed one also has the segment returning to node 0. A shape still
+   * being created has no closing segment either: the last one is the one the cursor is dragging. */
+  const int last_segment_index = (centreline || mask_gui->creation) ? node_count - 2 : node_count - 1;
 
-  /* Round only the OUTWARD side of the two true ends of the WHOLE path (e.g. a brush stroke), not
-   * every segment's own two ends -- that would also round every interior node joint, which is a
-   * line JOIN, not a cap, and looks like a bump at each node instead of the intended smooth stroke
-   * tip. cairo_line_cap is a property of the whole stroke() call, and each segment below is
-   * stroked independently with CAIRO_LINE_CAP_BUTT (so that per-segment selection/dash state
-   * works AND consecutive segments join flush, without a cap bump at every node), so there is no
-   * single stroke covering just the two true ends to set a cap on.
-   *
-   * Instead: paint a full disc (radius = half the line width) at each true end FIRST, before any
-   * segment is stroked. The first and last segments below then get their normal, unchanged
-   * BUTT-capped stroke painted OVER these discs -- flush at the true end, extending only inward --
-   * which exactly covers the inward half of each disc (same centerline, same width, same colour
-   * passes) and leaves only the outward half showing: precisely what CAIRO_LINE_CAP_ROUND draws
-   * for a real one-sided cap. Node positions come straight from the node header (points[i*6+2/+3]
-   * is node i's own coordinate), not the tessellated tail, so this needs no walk of the outline
-   * and no assumption about whether that tail wraps back to node 0. */
-  if(round_ends)
+  /* A dot on each true end of the whole path: every segment's dots start on its first node, but
+   * the last segment's may stop short of the last node, in a gap. Node positions come straight
+   * from the node header (points[i*6+2/+3] is node i's own coordinate), not the tessellated tail,
+   * so this needs no walk of the outline and no assumption about whether that tail wraps back to
+   * node 0.
+   * Off, kept for reuse: stroked DT_MASKS_NO_DASH, whose dark pass is denser than a dashed one's,
+   * the discs come out darker than the dots they end. */
+  /*
+  if(centreline)
   {
     const gboolean all_selected = group_selected
                                   && dt_masks_is_anything_selected(mask_gui)
@@ -3533,6 +3567,7 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
     cairo_line_to(cr, end_x, end_y);
     dt_draw_stroke_line(DT_MASKS_NO_DASH, FALSE, cr, all_selected, zoom_scale, CAIRO_LINE_CAP_ROUND);
   }
+  */
 
   int show_segment_index = 1;
   int current_segment_index = 0;
@@ -3598,6 +3633,9 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
 
       if(mask_gui->creation && current_segment_index == node_count - 2)
         dt_draw_stroke_line(DT_MASKS_DASH_ROUND, FALSE, cr, all_selected, zoom_scale, CAIRO_LINE_CAP_ROUND);
+      else if(centreline)
+        dt_draw_stroke_line(DT_MASKS_DASH_ROUND, FALSE, cr, (seg_is_selected || all_selected), zoom_scale,
+                            CAIRO_LINE_CAP_ROUND);
       else
         dt_draw_stroke_line(DT_MASKS_NO_DASH, FALSE, cr, (seg_is_selected || all_selected), zoom_scale,
                             CAIRO_LINE_CAP_BUTT);
@@ -3763,18 +3801,19 @@ static void _bbox_include_array(const float *const array, const int count, doubl
   }
 }
 
-/* The box of everything the session draws: the spines AND the borders. It held the spines
- * alone, and a brush's dashed border lies a radius outside its spine, further than the clip's
- * margin; the pattern was clipped to it on a cache hit after a pan or zoom. */
+/* The box of everything the session draws: the spines, the borders and the clone sources --
+ * each outline's own box (dt_masks_gui_points_update_bbox()). A brush's dashed border lies a
+ * radius outside its spine and a source anywhere, both further than the clip's margin: the
+ * pattern is clipped to this box on a cache hit, and the canvas composites no more of it. */
 static gboolean _session_bbox_from_points(const dt_masks_form_gui_t *gui, double bbox[4])
 {
   gboolean any = FALSE;
   for(const GList *node = gui->points; node; node = g_list_next(node))
   {
     const dt_masks_form_gui_points_t *const pts = (const dt_masks_form_gui_points_t *)node->data;
-    if(IS_NULL_PTR(pts)) continue;
-    _bbox_include_array(pts->points, pts->points_count, bbox, &any);
-    _bbox_include_array(pts->border, pts->border_count, bbox, &any);
+    if(IS_NULL_PTR(pts) || pts->bbox[0] > pts->bbox[1] || pts->bbox[2] > pts->bbox[3]) continue;
+    const float corners[4] = { pts->bbox[0], pts->bbox[2], pts->bbox[1], pts->bbox[3] };
+    _bbox_include_array(corners, 2, bbox, &any);
   }
   return any;
 }
@@ -3860,7 +3899,11 @@ static void _masks_draw_creation_session_forms(dt_develop_t *develop, dt_iop_mod
     return;
   }
 
-  const int count = g_list_length(creation_gui->creation_formids);
+  // Only the shapes the history still holds are drawn, so only they count: an undo or a redo
+  // takes shapes away or brings them back while the session stays armed.
+  int count = 0;
+  for(const GList *node = creation_gui->creation_formids; node; node = g_list_next(node))
+    if(!IS_NULL_PTR(dt_masks_get_from_id(develop, GPOINTER_TO_INT(node->data)))) count++;
 
   if(!creation_gui->creation)
   {
@@ -3977,7 +4020,7 @@ static void _masks_draw_creation_session_forms(dt_develop_t *develop, dt_iop_mod
     {
       const guint point_count = g_list_length(session_form->points);
       _session_gui.type = session_form->type;
-      session_form->functions->post_expose(cr, zoom_scale, &_session_gui, index, point_count);
+      session_form->functions->post_expose(cr, zoom_scale, session_form, &_session_gui, index, point_count);
     }
 
     /* Which half costs: rebuilding an outline, or stroking it. The session is 15.9 ms of a 25.7 ms
@@ -4110,11 +4153,12 @@ static void _rect_include(cairo_rectangle_int_t *rect, gboolean *any, const doub
  * rectangle, possibly after a pan -- a ghost, which is seen much later and understood never.
  *
  * The bound: every header point of every outline -- node and both control points, three per
- * node, plus the border's own header, where the border handle sits, and the source's --
- * grown by the longest control vector, because a curvature handle is that vector rotated a
- * quarter turn about its node (same length, any direction), by a node's disc and by an arrow
- * head. A buffer too short to have a header (a circle's, a source's) contributes its first
- * points. The outlines themselves the rasteriser reports exactly, on top of this. */
+ * node, plus the border's own header, where the border handle sits, and the source's -- and
+ * the outline's box, which holds the clone source cairo strokes wherever it lies, grown by
+ * the longest control vector, because a curvature handle is that vector rotated a quarter
+ * turn about its node (same length, any direction), by a node's disc and by an arrow head. A
+ * buffer too short to have a header (a circle's, a source's) contributes its first points.
+ * The outlines themselves the rasteriser reports exactly, on top of this. */
 /* A frame of the canvas: where it sits in cr's device space, and the context that draws
  * into it in cr's coordinates. */
 typedef struct _canvas_frame_t
@@ -4228,6 +4272,11 @@ static void _canvas_cairo_bound(cairo_t *canvas_cr, const dt_masks_form_gui_t *g
     if(IS_NULL_PTR(pts)) continue;
     const int nodes = _outline_nodes(gui->dev, form, index);
     _bound_include_headers(canvas_cr, pts, nodes, scale, rect, any);
+    /* The box spans the border and where the source is drawn, which cairo strokes along with
+     * the arrow joining the two. It is empty before the first sample. */
+    const float box[8] = { pts->bbox[0], pts->bbox[2], pts->bbox[1], pts->bbox[2],
+                           pts->bbox[0], pts->bbox[3], pts->bbox[1], pts->bbox[3] };
+    if(pts->bbox[0] <= pts->bbox[1]) _bound_include_points(canvas_cr, box, 4, scale, rect, any);
     reach = MAX(reach, _bound_header_reach(canvas_cr, pts, nodes, scale));
   }
   if(!*any) return;
@@ -4633,31 +4682,25 @@ static void _overlay_draw_form(cairo_t *cr, const float zoom_scale, dt_masks_for
   {
     const guint point_count = g_list_length(mask_form->points);
     mask_gui->type = mask_form->type;
-    mask_form->functions->post_expose(cr, zoom_scale, mask_gui, 0, point_count);
+    mask_form->functions->post_expose(cr, zoom_scale, mask_form, mask_gui, 0, point_count);
   }
 }
 
 /* What was painted this frame: the rasteriser's own record, and the bounds of what cairo drew
  * on top. The transform must still be in effect on @p canvas_cr, which is what the header
  * bounds need; a creation session paints through its own cached pattern and takes the whole
- * canvas. Returns FALSE when nothing was painted. */
+ * canvas. Cut to the frame: a rectangle reaching out of the view is one no expose covers, and
+ * _overlay_damage_record() would ask a redraw of it after every frame. Returns FALSE when
+ * nothing was painted. */
 static gboolean _overlay_dirty(const _canvas_frame_t *frame, const cairo_rectangle_int_t *cairo_bound,
                                const gboolean cairo_bounded, cairo_rectangle_int_t *dirty)
 {
-  gboolean any = dt_stroke_raster_touched(frame->canvas, dirty);
-  if(!cairo_bounded) return any;
-  if(!any)
-  {
-    *dirty = *cairo_bound;
-    return TRUE;
-  }
-  const int x1 = MAX(dirty->x + dirty->width, cairo_bound->x + cairo_bound->width);
-  const int y1 = MAX(dirty->y + dirty->height, cairo_bound->y + cairo_bound->height);
-  dirty->x = MIN(dirty->x, cairo_bound->x);
-  dirty->y = MIN(dirty->y, cairo_bound->y);
-  dirty->width = x1 - dirty->x;
-  dirty->height = y1 - dirty->y;
-  return TRUE;
+  const cairo_rectangle_int_t view = { 0, 0, frame->width, frame->height };
+  if(!dt_stroke_raster_touched(frame->canvas, dirty))
+    *dirty = cairo_bounded ? *cairo_bound : (cairo_rectangle_int_t){ 0, 0, 0, 0 };
+  else if(cairo_bounded)
+    gdk_rectangle_union(dirty, cairo_bound, dirty);
+  return gdk_rectangle_intersect(dirty, &view, dirty);
 }
 
 void dt_masks_events_post_expose_with(dt_develop_t *dev, struct dt_iop_module_t *module, cairo_t *cr,

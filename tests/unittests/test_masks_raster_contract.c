@@ -1,6 +1,7 @@
 /*
     This file is part of Ansel,
     Copyright (C) 2026 Aurélien PIERRE.
+    Copyright (C) 2026 Guillaume Stutin.
 
     Ansel is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -158,9 +159,9 @@ static void _an_unbuildable_outline_is_never_reported_as_built(void **state)
     // The caller stamps the group-wide outline cache key on success. Reporting success here
     // with *points still NULL is what marked the cache current over an outline that had never
     // been built, hiding the shape until the geometry generation next changed.
-    assert_int_not_equal(dt_masks_get_points_border(NULL, &form, &points, &points_count, &border,
-                                                    &border_count, NULL, NULL, 0, NULL),
-                         DT_MASKS_RASTER_OK);
+    const dt_masks_outline_out_t outline = { .points = &points, .points_count = &points_count,
+                                             .border = &border, .border_count = &border_count };
+    assert_int_not_equal(dt_masks_get_points_border(NULL, &form, &outline, 0, NULL), DT_MASKS_RASTER_OK);
     assert_null(points);
   }
 }

@@ -330,7 +330,7 @@ static void _gradient_get_distance(float x, float y, float dist_mouse, dt_masks_
 }
 
 static void _gradient_node_position_cb(const dt_masks_form_gui_points_t *gui_points, int node_index,
-                                       float *node_x, float *node_y, void *user_data)
+                                       float *node_x, float *node_y, __attribute__((unused)) const void *user_data)
 {
   if(node_x) *node_x = NAN;
   if(node_y) *node_y = NAN;
@@ -338,14 +338,16 @@ static void _gradient_node_position_cb(const dt_masks_form_gui_points_t *gui_poi
 
 static void _gradient_distance_cb(float pointer_x, float pointer_y, float cursor_radius,
                                   dt_masks_form_gui_t *mask_gui, int form_index, int node_count, int *inside,
-                                  int *inside_border, int *near_handle, int *inside_source, float *dist, void *user_data)
+                                  int *inside_border, int *near_handle, int *inside_source, float *dist,
+                                  __attribute__((unused)) const void *user_data)
 {
   _gradient_get_distance(pointer_x, pointer_y, cursor_radius, mask_gui, form_index, 0, inside,
                          inside_border, near_handle, inside_source, dist);
 }
 
 static void _gradient_post_select_cb(dt_masks_form_gui_t *mask_gui, int inside, int inside_border,
-                                     int inside_source, void *user_data)
+                                     __attribute__((unused)) int inside_source,
+                                     __attribute__((unused)) const void *user_data)
 {
   if(inside)
   {
@@ -362,8 +364,10 @@ static int _find_closest_handle(dt_masks_form_t *mask_form, dt_masks_form_gui_t 
 {
   if(mask_gui) mask_gui->pivot_selected = FALSE;
   return dt_masks_find_closest_handle_common(mask_form, mask_gui, index, 1,
-                                             NULL, NULL, _gradient_node_position_cb,
-                                             _gradient_distance_cb, _gradient_post_select_cb, NULL);
+                                             &(const dt_masks_hit_callbacks_t){
+                                                 .node_position = _gradient_node_position_cb,
+                                                 .distance = _gradient_distance_cb,
+                                                 .post_select = _gradient_post_select_cb });
 }
 
 
@@ -1104,7 +1108,9 @@ static void _gradient_draw_arrow(cairo_t *cr, const gboolean selected, const gbo
   dt_draw_node(cr, FALSE, FALSE, pivot_selected, zoom_scale, anchor_x, anchor_y);
 }
 
-static void _gradient_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_form_gui_t *gui, int index, int nb)
+static void _gradient_events_post_expose(cairo_t *cr, float zoom_scale,
+                                         __attribute__((unused)) const dt_masks_form_t *form,
+                                         dt_masks_form_gui_t *gui, int index, int nb)
 {
   // preview gradient creation
   if(gui->creation)
@@ -1145,28 +1151,22 @@ static void _gradient_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks
 }
 
 static dt_masks_raster_result_t _gradient_get_points_border(dt_develop_t *dev, dt_masks_form_t *form,
-                                       float **points, int *points_count,
-                                       float **border, int *border_count,
-                                       dt_masks_skip_range_t **border_skips, int *border_skip_count,
-                                       int source,
-                                       const dt_iop_module_t *module)
+                                                            const dt_masks_outline_out_t *const out,
+                                                            __attribute__((unused)) int source,
+                                                            const dt_iop_module_t *module)
 {
-  if(!IS_NULL_PTR(border_skips)) *border_skips = NULL;
-  if(!IS_NULL_PTR(border_skip_count)) *border_skip_count = 0;
-
-    // unused arg, keep compiler from complaining
   // No geometry: an empty outline is the correct result here, not a failure. See the circle.
   if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
   dt_masks_anchor_gradient_t *gradient = (dt_masks_anchor_gradient_t *)form->points->data;
   if(IS_NULL_PTR(gradient)) return DT_MASKS_RASTER_EMPTY;
   if(_gradient_get_points(dev, gradient->center[0], gradient->center[1], gradient->rotation, gradient->curvature,
-                          points, points_count) != 0)
+                          out->points, out->points_count) != 0)
     return DT_MASKS_RASTER_ERROR;
-  if(border)
+  if(out->border)
     return dt_masks_raster_from_status(
         _gradient_get_pts_border(dev, gradient->center[0], gradient->center[1],
                                  gradient->rotation, gradient->extent, gradient->curvature,
-                                 border, border_count));
+                                 out->border, out->border_count));
   return DT_MASKS_RASTER_OK;
 }
 

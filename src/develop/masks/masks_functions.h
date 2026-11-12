@@ -54,6 +54,19 @@
 extern "C" {
 #endif
 
+/** Where get_points_border() writes an outline: each member is the address of the caller's own
+ * variable. `points' and `points_count' are required; a NULL member is a part the caller does not
+ * want, which is then neither built nor written. */
+typedef struct dt_masks_outline_out_t
+{
+  float **points;
+  int *points_count;
+  float **border;
+  int *border_count;
+  dt_masks_skip_range_t **border_skips;
+  int *border_skip_count;
+  float **fading;
+} dt_masks_outline_out_t;
 
 /** structure used to store pointers to the functions implementing operations on a mask shape */
 /** plus a few per-class descriptive data items */
@@ -79,12 +92,17 @@ typedef struct dt_masks_functions_t
    * distinction is load-bearing: the outline cache key covers the whole group, so caching a
    * FAILURE hides the shape until the geometry next moves, while refusing to cache an
    * legitimately EMPTY one rebuilds every shape of the group on every expose, forever.
+   *
+   * `fading', when given with `border', receives the contour the fading starts on, for a shape
+   * whose outline is not that contour: index-aligned with the border and as long, or NULL. Only a
+   * brush has one -- its outline is its centreline.
+   *
+   * Called only through dt_masks_get_points_border(), which clears `border_skips' and `fading'
+   * first: a shape writes them only when it has them.
    */
   dt_masks_raster_result_t (*get_points_border)(struct dt_develop_t *dev, struct dt_masks_form_t *form,
-                           float **points, int *points_count,
-                           float **border, int *border_count,
-                           dt_masks_skip_range_t **border_skips, int *border_skip_count,
-                           int source, const dt_iop_module_t *const module);
+                                                const dt_masks_outline_out_t *const out, int source,
+                                                const dt_iop_module_t *const module);
   /** Rasterise into a freshly allocated buffer covering the shape's own bounding box.
    * Same three outcomes as get_mask_roi. On anything but OK the out-parameters are still
    * written (NULL buffer, zero geometry): callers read them unconditionally. */
@@ -139,7 +157,8 @@ typedef struct dt_masks_functions_t
                          struct dt_masks_form_t *form, int parentid, struct dt_masks_form_gui_t *gui, int index);
   /* Key event */
   int (*key_pressed)(struct dt_iop_module_t *module, GdkEventKey *event, struct dt_masks_form_t *form, int parentid, struct dt_masks_form_gui_t *gui, int index);
-  void (*post_expose)(cairo_t *cr, float zoom_scale, struct dt_masks_form_gui_t *gui, int index, int num_points);
+  void (*post_expose)(cairo_t *cr, float zoom_scale, const struct dt_masks_form_t *form,
+                      struct dt_masks_form_gui_t *gui, int index, int num_points);
   // The function to draw the shape in question. Signature must match shape_draw_function_t.
   shape_draw_function_t draw_shape;
   /** initialise all control points to eventually match a catmull-rom like spline */
@@ -160,10 +179,8 @@ dt_masks_raster_result_t dt_masks_get_mask_roi(const dt_iop_module_t *const modu
  * hit-tested at. The brush and the polygon sample their curves, arcs and stamps at it; the
  * circle, the ellipse and the gradient have their own sampling. */
 dt_masks_raster_result_t dt_masks_get_points_border(struct dt_develop_t *dev, dt_masks_form_t *form,
-                               float **points, int *points_count,
-                               float **border, int *border_count,
-                               dt_masks_skip_range_t **border_skips, int *border_skip_count,
-                               int source, dt_iop_module_t *module);
+                                                    const dt_masks_outline_out_t *const out, int source,
+                                                    dt_iop_module_t *module);
 
 /** The boundary of a shape's outline: which border samples are not strictly inside any other
  * sample's disc, published as the skip ranges every consumer of the outline already reads.

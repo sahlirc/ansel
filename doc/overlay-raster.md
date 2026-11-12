@@ -52,12 +52,72 @@ surface the size of the clip in pixels (created once, kept across frames, given 
 device scale), draws every shape into it through a `cairo_t` carrying `cr`'s matrix shifted to
 the clip's origin, and composites onto the view only the rectangle that was painted: the
 rasteriser's own record, plus a bound on what cairo may draw on top — the node header of every
-outline, node and both control points, three per node, with a margin for a node's disc and an
-arrow head. That bound is computed *before* anything is drawn and the canvas context is clipped
-to it, so a handle that lands outside the estimate is not painted rather than left behind for
-the next frame (the harness draws a panned frame after every state and fails on any pixel a
-fresh surface would not show). The rectangle is then cleared by hand for the next frame. A creation
-session, which paints through its own cached pattern, takes the whole canvas.
+outline, node and both control points, three per node, and the outline's box, with a margin for a
+node's disc and an arrow head. That bound is computed *before* anything is drawn and the canvas
+context is clipped to it, so a handle that lands outside the estimate is not painted rather than
+left behind for the next frame (the harness draws a panned frame after every state and fails on
+any pixel a fresh surface would not show). The rectangle is then cleared by hand for the next frame.
+A creation session, which paints through its own cached pattern, is bounded by the union of its
+outlines' boxes and not clipped. The shape being drawn has no outline yet: what of it the
+rasteriser paints it records, and what cairo strokes itself — a brush's trace and cursor
+(`_brush_events_post_expose()`), a clone's source cross (`dt_draw_cross()`) — is declared with
+`dt_stroke_raster_touch_path()`, which adds the path's extents, grown by half the line width, to
+the same touched rectangle. Undeclared, it is painted into the canvas and composited only where
+the session's box happens to cover it. The first stroke of a session is the exception that hid
+this: with no box yet, the bound is the whole canvas.
+
+*Measured on top of `0a3d158d66`, 2026-11-10*, with the same shim: retouch's brush armed, a first
+stroke from (75, 97) to (150, 130), then a second from inside its box to (400, 518), the frame
+dumped at the second stroke's last motion. The composited rectangle ended at (199, 187), the trace
+beyond it drawn and never shown; it ends at (418, 536).
+
+The outline's box (`dt_masks_gui_points_update_bbox()`) holds its samples, its border, its clone
+source's samples, and the shape's box carried onto the source by the shift between the first
+points of the two outlines. Cairo strokes the source and the arrow, wherever the user put the
+source, and a source may be drawn as large as the border: a brush too short to have a line draws
+its border there ([`masks-geometry.md`](masks-geometry.md)).
+
+A point that is not finite is not a sample, and the box leaves it out. A gradient's border joins its
+two curves with an `(INFINITY, INFINITY)` separator (`_gradient_get_pts_border()`), and counting it
+made the box infinite: no hit test could rule a gradient out, and the bounds carried the infinity
+into `_rect_include()`, whose conversion to `int` is undefined. On x86 it gives `INT_MIN`, which
+here happened to make a rectangle that covered everything; nothing was measured on ARM.
+
+The session clip (`_session_clip()`) took that box too: a rectangle of infinite width, which let
+nothing through, so in a gradient creation session the gradient already made was not drawn while
+the next one was placed.
+
+*Measured on top of `8e5892d09f`, 2026-11-10*, with a shim that makes a gradient in exposure's drawn
+mask, dumps the frame with the session still open, then selects the gradient the way Escape does.
+The box was x −1684 to inf, y −642 to inf; it is x −1684 to 4082, y −642 to 2242. The selected
+gradient draws the same pixels. The session frame draws 3230 more, all within 2 px of where the
+gradient is drawn once selected; master drew none of them either.
+
+The border's header holds no point the shape does not draw: a brush's and a polygon's repeat the
+outline's header there ([`masks-geometry.md`](masks-geometry.md)). It was zeros, the image's origin,
+so the box of every brush and polygon reached the top-left corner of the image, and with it the
+rectangle composited and cleared each frame and the session's bound.
+
+*Measured on top of `815455e77b`, 2026-11-10*, at fit zoom in a 500×648 view, shapes at the bottom
+right of the image. A brush's box went from x 0..2407, y 0..1529 to x 1717..2407, y 1097..1529 (image
+pixels), its composited rectangle from 500×421 to 204×202, and the composite from 0.31 to 0.10 ms per
+frame (400 frames each; 0.10 ms is the print's resolution). A dot's rectangle went from 247×133 to
+88×87, a polygon's from 500×457 to 213×263, a two-stroke creation session's from 418×473 to 387×473.
+Every overlay drew the same pixels, nothing painted was left outside the rectangle, and a mouse move
+cost the same, about 180 µs, inside the old box or outside both.
+
+The rectangle is cut to the frame before it is composited and recorded. One reaching out of the
+view is a rectangle no expose covers: `_overlay_damage_record()` asks a redraw of what the expose
+did not cover, so such a rectangle repaints the overlay frame after frame for as long as it lasts.
+
+*Measured on top of `6fde4487bb`, 2026-11-10*, with an `LD_PRELOAD` shim on a RelWithDebInfo
+build, Xephyr at 1280×900, a 2400×1600 JPEG at fit zoom, the rectangle read from
+`MASKS_DUMP_OVERLAY`: retouch's shape armed by its button, its source placed by Shift+click, a click
+to make the shape. In the creation session, a circle of radius 0.3 had its source down to canvas
+row 485 and a composited rectangle ending at row 323; it ends at 511. A one-point brush, its source
+at row 389 and its rectangle ending at 230, ends at 424. Selected outside the session, the brush's
+rectangle began at column −15: the overlay drew 57 frames in the next second with nothing moving,
+and draws 1.
 
 ## Measured
 

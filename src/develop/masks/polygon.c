@@ -311,7 +311,7 @@ static void _polygon_init_ctrl_points(dt_masks_form_t *mask_form)
  *
  * Returns TRUE when points are clockwise in normalized space.
  */
-static gboolean _polygon_is_clockwise(dt_masks_form_t *mask_form)
+static gboolean _polygon_is_clockwise(const dt_masks_form_t *const mask_form)
 {
   if(IS_NULL_PTR(mask_form) || IS_NULL_PTR(mask_form->points)) return 0;
   if(!g_list_shorter_than(mask_form->points, 3)) // if we have at least three points...
@@ -663,7 +663,7 @@ static void _polygon_walk_write_header(const _polygon_walk_t *const w)
   {
     int from = k;
     for(int step = 0; step < w->node_count && !w->node_has_border[from]; step++) from = (from + 1) % w->node_count;
-    if(!w->node_has_border[from]) return;   /* no segment had a direction: the header stays zero */
+    if(!w->node_has_border[from]) return;   /* no segment had a direction: the header stays the outline's */
     border[k * 6] = w->node_border[from * 2];
     border[k * 6 + 1] = w->node_border[from * 2 + 1];
   }
@@ -749,7 +749,11 @@ static int _polygon_get_pts_border(dt_develop_t *develop, dt_masks_form_t *mask_
       buf[5] = node->ctrl2[1] * input_height - dy;
     }
   }
-  if(!IS_NULL_PTR(dborder)) dt_masks_dynbuf_add_zeros(dborder, 6 * node_count);
+  /* The border's header repeats the outline's until _polygon_walk_write_header() puts each node's
+   * border handle in it: zeros there put the image's origin in every box taken over the buffer. */
+  float *const border_header = IS_NULL_PTR(dborder) ? NULL : dt_masks_dynbuf_reserve_n(dborder, 6 * node_count);
+  if(!IS_NULL_PTR(border_header))
+    memcpy(border_header, dt_masks_dynbuf_buffer(dpoints), sizeof(float) * 6 * node_count);
 
   const gboolean clockwise = _polygon_is_clockwise(mask_form);
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -963,19 +967,16 @@ static void _polygon_translate_all_nodes(dt_masks_form_t *mask_form, const float
 }
 
 static dt_masks_raster_result_t _polygon_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
-                                      float **point_buffer, int *point_count,
-                                      float **border_buffer, int *border_count,
-                                      dt_masks_skip_range_t **border_skips, int *border_skip_count,
-                                      int source, const dt_iop_module_t *module)
+                                                           const dt_masks_outline_out_t *const out, int source,
+                                                           const dt_iop_module_t *module)
 {
   // Asking for the source outline without a module is a programming error, not an empty shape.
   if(source && IS_NULL_PTR(module)) return DT_MASKS_RASTER_ERROR;
   const double ioporder = (module) ? module->iop_order : 0.0f;
   const dt_masks_distort_t gui_dist = dt_masks_distort_for_gui(develop);
-  if(!IS_NULL_PTR(border_skips)) *border_skips = NULL;
-  if(!IS_NULL_PTR(border_skip_count)) *border_skip_count = 0;
   const int status = _polygon_get_pts_border(develop, mask_form, ioporder, DT_DEV_TRANSFORM_DIR_ALL, &gui_dist,
-                                             point_buffer, point_count, border_buffer, border_count, source);
+                                             out->points, out->points_count, out->border, out->border_count,
+                                             source);
 
   /* This outline feeds the GUI only -- the rasterisers build their own from the pixel path and
    * paint every spoke. What the outline shows is the BOUNDARY of what they paint, decided per
@@ -985,12 +986,12 @@ static dt_masks_raster_result_t _polygon_get_points_border(dt_develop_t *develop
    * as skip ranges, which is what every consumer of this outline already reads. The polygon's
    * own detector, which intersected the outline with itself and chose cuts, is gone with the
    * brush's. */
-  if(status == 0 && !IS_NULL_PTR(border_buffer) && !IS_NULL_PTR(*border_buffer)
-     && !IS_NULL_PTR(border_skips) && !IS_NULL_PTR(border_skip_count))
+  if(status == 0 && !IS_NULL_PTR(out->border) && !IS_NULL_PTR(*out->border)
+     && !IS_NULL_PTR(out->border_skips) && !IS_NULL_PTR(out->border_skip_count))
   {
     const int header = (int)g_list_length(mask_form->points) * 3;
-    *border_skip_count = dt_masks_outline_boundary_skips(*point_buffer, *border_buffer, *border_count, header,
-                                                         border_skips);
+    *out->border_skip_count = dt_masks_outline_boundary_skips(*out->points, *out->border, *out->border_count,
+                                                              header, out->border_skips);
   }
   return dt_masks_raster_from_status(status);
 }
@@ -1288,7 +1289,8 @@ static void _polygon_get_distance(float point_x, float point_y, float radius,
  * Polygon borders are stored directly in gui_points->border at node indices.
  */
 static gboolean _polygon_border_handle_cb(const dt_masks_form_gui_points_t *gui_points, int node_count,
-                                          int node_index, float *handle_x, float *handle_y, void *user_data)
+                                          int node_index, float *handle_x, float *handle_y,
+                                          __attribute__((unused)) const void *user_data)
 {
   if(IS_NULL_PTR(gui_points) || node_index < 0 || node_index >= node_count) return FALSE;
   *handle_x = gui_points->border[node_index * 6];
@@ -1300,7 +1302,8 @@ static gboolean _polygon_border_handle_cb(const dt_masks_form_gui_points_t *gui_
  * @brief Polygon-specific curve handle lookup (depends on winding direction).
  */
 static void _polygon_curve_handle_cb(const dt_masks_form_gui_points_t *gui_points, int node_index,
-                                     float *handle_x, float *handle_y, void *user_data)
+                                     float *handle_x, float *handle_y,
+                                     __attribute__((unused)) const void *user_data)
 {
   
   _polygon_ctrl2_to_handle(gui_points->points[node_index * 6 + 2], gui_points->points[node_index * 6 + 3],
@@ -1313,7 +1316,8 @@ static void _polygon_curve_handle_cb(const dt_masks_form_gui_points_t *gui_point
  */
 static void _polygon_distance_cb(float pointer_x, float pointer_y, float cursor_radius,
                                  dt_masks_form_gui_t *mask_gui, int form_index, int node_count, int *inside,
-                                 int *inside_border, int *near_handle, int *inside_source, float *dist, void *user_data)
+                                 int *inside_border, int *near_handle, int *inside_source, float *dist,
+                                 __attribute__((unused)) const void *user_data)
 {
   
   _polygon_get_distance(pointer_x, pointer_y, cursor_radius, mask_gui, form_index, node_count,
@@ -1323,8 +1327,10 @@ static void _polygon_distance_cb(float pointer_x, float pointer_y, float cursor_
 static int _find_closest_handle(dt_masks_form_t *mask_form, dt_masks_form_gui_t *mask_gui, int form_index)
 {
   return dt_masks_find_closest_handle_common(mask_form, mask_gui, form_index, -1,
-                                             _polygon_border_handle_cb, _polygon_curve_handle_cb, NULL,
-                                             _polygon_distance_cb, NULL, NULL);
+                                             &(const dt_masks_hit_callbacks_t){
+                                                 .border_handle = _polygon_border_handle_cb,
+                                                 .curve_handle = _polygon_curve_handle_cb,
+                                                 .distance = _polygon_distance_cb });
 }
 
 /**
@@ -2030,8 +2036,8 @@ static void _polygon_draw_shape(struct dt_develop_t *dev, cairo_t *cr, const flo
 /**
  * @brief Draw polygon overlays (nodes, handles, borders, source) after exposure.
  */
-static void _polygon_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_form_gui_t *mask_gui,
-                                        int form_index, int node_count)
+static void _polygon_events_post_expose(cairo_t *cr, float zoom_scale, const dt_masks_form_t *form,
+                                        dt_masks_form_gui_t *mask_gui, int form_index, int node_count)
 {
   dt_masks_form_gui_points_t *gui_points
       = (dt_masks_form_gui_points_t *)g_list_nth_data(mask_gui->points, form_index);
@@ -2058,15 +2064,7 @@ static void _polygon_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_
   else if((mask_gui->type & DT_MASKS_IS_RETOUCHE) != 0 || mask_gui->node_selected || mask_gui->node_dragging >= 0
           || mask_gui->handle_selected)
   {
-    dt_masks_form_t *group_form = dt_masks_get_visible_form(mask_gui->dev);
-    if(!IS_NULL_PTR(group_form) && (group_form->type & DT_MASKS_GROUP))
-    {
-      dt_masks_form_group_t *group_entry = g_list_nth_data(group_form->points, form_index);
-      dt_masks_form_t *polygon_form = group_entry
-                                          ? dt_masks_get_from_id(mask_gui->dev, group_entry->formid)
-                                          : NULL;
-      if(!IS_NULL_PTR(polygon_form)) gui_points->clockwise = _polygon_is_clockwise(polygon_form);
-    }
+    gui_points->clockwise = _polygon_is_clockwise(form);
   }
 
   // draw polygon

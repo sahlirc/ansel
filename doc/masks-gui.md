@@ -53,11 +53,53 @@ panel becomes the authority.
 Consequence for the on-canvas hints (`set_hint_message`, per shape): they document **gestures
 only** — drag, ctrl+click, right-click, Del, Enter, Esc — never the wheel, which the panel now
 shows. Their branches follow the hit-test order of `dt_masks_find_closest_handle_common()`
-(border handle, curve handle, node, segment, then the shape), because the innermost target under
+(border handle, curve handle, node, a brush's solid-part handle, segment, then the shape), because the innermost target under
 the cursor is what the next click acts on. Two traps when editing them: a node's Del and
 ctrl+click only work once that node is *selected* (a mere hover gets the shorter message), and
 `dt_hinter_set_message()` joins `\n` into `, `, so each line must read as a clause of one
 sentence.
+
+## A brush's size and fading edit its solid part and its ramp, as a circle's do
+
+*Found on top of `5a136d1a04`, 2026-11-11.*
+
+A brush node stores its whole radius (`border[0]` and `border[1]`, which every writer sets
+together) and the fraction `fading` of it that is solid. The controls edit neither number as
+such: **size** edits the solid radius `fading · border`, **fading** the width of the ramp outside
+it, `(1 − fading) · border`, and each leaves the other part as it is — the way a circle's size and
+fading edit its radius and its border. `_brush_resize_part()` (`brush.c`) is the one place that
+turns a change of one part into a new `border` and `fading`, and every control goes through it:
+the wheel, the context-menu sliders, both node handles, and the defaults a new brush is drawn
+with.
+
+- `get_interaction_value(DT_MASKS_INTERACTION_FADING)` answers the mean ramp width, in the
+  normalized units of the circle's and the polygon's border, so the absolute "Fading" slider
+  (0–100 %) sets the ramp width. "Size" is the shared relative log2 slider and scales the solid
+  radius.
+- The wheel scales the part it edits by 1.02 per notch, up growing it, for both parts.
+- Neither part goes below `PART_MIN` (0.0005, the circle's narrowest border) and the whole radius
+  stays at most 1. A part at that floor grows back slowly under the wheel, as a circle's border
+  does.
+- An edit applies the same change to the `border`/`fading` conf keys the next brush is created
+  with; during creation the wheel edits those keys alone, so size grows the preview's filled disc
+  and fading its ring.
+- Nothing stored is converted: a node keeps its `border` and `fading`. Between two nodes whose
+  radius or fading differ, the solid part is a disc union of its own
+  ([brush-boundary.md](brush-boundary.md#the-solid-part-is-a-disc-union)), so a brush saved
+  before that paints another solid part there (on top of `0d108992d6`, 2026-11-12).
+
+A selected node has two handles on one ray from the node. The outer one, on the whole radius,
+moves the ramp's outer edge; the inner one, `_brush_get_solid_handle()`, sits where the node's own
+spoke turns from solid to ramp and moves the edge of the solid part. Both are border handles to
+the selection state (`handle_border_hovered`, `_selected`, `_dragging`) and are told apart by
+`mask_gui->handle_border_solid`, which the hit test writes and a drag keeps. A third handle family
+would have needed every reset, `dt_masks_is_anything_selected/hovered()`,
+`dt_masks_gui_set/reset_dragging()` and the cursor shape to learn about it; sharing the state
+covers all of them untouched. The hit test offers the inner handle through
+`dt_masks_hit_callbacks_t.solid_handle`, tested **after** the node itself: on a node whose solid
+part is narrower than the cursor the handle covers the node, and testing it first would leave the
+node out of reach. The handle needs the node's fraction, which the GUI points do not carry, which
+is why `post_expose` is handed the form it draws.
 
 ## A right click targets, it never drags — and the context menu leans on that
 
@@ -91,6 +133,49 @@ instead would survive that, since `dt_masks_gui_selected_segment_index()` (`mask
 `seg_hovered` outright and consults no selection flag — but two spellings of one question is what
 this section exists to prevent, so the flags are kept honest at the source instead.
 
+## A shape's event handler may replace the visible form, so the dispatcher reads it again after
+
+*Found on top of `3ce1ec6716`, 2026-11-09.*
+
+`dev->form_gui->form_visible` is a raw pointer and holds no reference. The event dispatchers in
+`masks/masks_gui.c` read it, hand one shape's handler the event, and then still have work to do —
+the group selection change after a release, the hint, the cursor. By then the visible form may no
+longer be the one they read: finishing a shape in a creation session
+(`dt_masks_gui_form_save_creation()`) makes the next unfinished shape visible, the saved one living
+on in `dev->forms`; and `dt_masks_cow_touch()`, one step earlier, may have cloned it and released
+the original.
+
+So nothing the dispatcher read before the handler describes what is visible after it.
+`_set_hinter_message()` reads the visible form itself instead of taking one from its caller,
+`dt_masks_events_button_released()` and `dt_masks_events_mouse_scrolled()` read it again after the
+handler, and `dt_masks_events_button_pressed()` computes what describes the state before the click
+(`shape_was_selected`) before the handler runs. `dt_masks_events_key_pressed()` reads its
+`mask_form` again only after a handler that declined the key, and no handler replaces the visible
+form while declining.
+
+## A creation session ends only when the user ends it
+
+*Found on top of `58765cdb5b`, 2026-11-09.*
+
+A shape's event handlers never end a creation session on their own. Finishing a shape keeps the
+tool armed for the next one, and a brush release whose press gathered no point
+(`_brush_events_button_released()`) draws nothing and leaves the session as it was: the same
+unfinished shape stays visible, `creation` stays set. Such a release is one whose press never
+collected a point — the press carried Shift and the release did not, the press did not reach the
+masks, or the device sent the release twice. What ends a session is a gesture of the user's:
+Escape, the context menu's entry, the armed toolbar button clicked again, BackSpace on a polygon
+with no node placed (all through `dt_masks_form_exit_creation()`), entering edit mode
+(`dt_masks_change_form_gui()`), giving another module the focus (`dt_masks_reset_form_gui()` from
+`dt_iop_request_focus()`), the first edit made off the canvas (see the section of that name below),
+and the darkroom tearing down.
+
+Measured under ASan (Debug, clang 19) with a `LD_PRELOAD` shim that, on the GUI thread, arms the
+brush on "diffuse or sharpen" and plays three strokes through `dt_control_button_pressed()`,
+`dt_control_mouse_moved()` and `dt_control_button_released()`. Three ordinary strokes save three
+shapes. When the second stroke has no press, a Shift press, or a second release after its own, that
+release leaves the unfinished shape's `formid` and the count of `dev->forms` unchanged with
+`creation` still set, and the third stroke is saved. No run reads freed memory.
+
 ## A shape toolbar's pressed button is a view on the creation state, not a state of its own
 
 *Found `1083ebf27b`, 2026-09-01.*
@@ -120,6 +205,97 @@ button that menu just chose unpressed.
 (`label`, `ctrl_label`, phrased as actions) plus its bare `name`. Menu entries offering a shape are
 built from it through `dt_masks_shape_menu_item_new()`, so a menu and the button offering the same
 shape cannot drift apart — they did, as "add path" against "add polygon".
+
+## A creation session ends with the first edit made off the canvas
+
+*Found on top of `5c15b7c508`, 2026-11-09.*
+
+A shape creation session is a tool for the canvas. The strokes, the canvas's own edits of the
+shapes they make and the settings of the armed tool keep it armed; so do zooming, panning, undo and
+redo. Every other edit ends it, as Escape does, through `dt_masks_form_exit_creation()`:
+
+- every edit made by a GUI control, at `dt_dev_add_history_item_real()`
+  (`develop/dev_history_gui.c`), the entry every widget commits through: a module's parameters,
+  its on/off switch, presets, the whole blending panel, a module moved in the pipe;
+- every history reload, at `dt_dev_history_gui_update()` (same file): a jump in the history list,
+  a style, a pasted or a compressed history applied to the image being edited
+  (`dt_apply_dev_history_update()`), a module-order preset.
+
+A module reset already ended it through `dt_iop_gui_blending_lose_focus()`, and so does giving
+another module the focus. Undo and redo reload the history too, but `_pop_undo()` refreshes the
+widgets through the GUI handler it is given (`_undo_restore_gui()`), not through
+`dt_dev_history_gui_update()`; that handler also restores the recorded mask view, except the edit
+mode while a session is armed, since changing it would end the session. Both entries live in
+`dev_history_gui.c`, the one file outside the module that includes `masks_gui.h` for this. The
+history list, the reset, the focus change and the module-order preset are read from the code, not
+measured; the history list and the preset go through the same function as the measured
+`dt_apply_dev_history_update()`.
+
+**The session's own commits must not go through the widget entry**, or each stroke would end the
+session it was drawn in. `dt_masks_gui_form_save_creation()` (each saved shape) and the darkroom's
+mask-edit commit (`_delayed_history_commit()`, `views/darkroom.c`, already throttled by
+`gui_throttle`) call `dt_dev_history_commit_item_now()` instead, after
+`dt_dev_history_flush_pending_commits()` so that the edits queued before them keep their order.
+The darkroom's commit is the one that was missed first: through the widget entry, it ended every
+session right after its first shape. A new commit made from the canvas must do the same.
+
+So do the settings of an armed shape tool. Retouch's algorithm buttons
+(`rt_select_algorithm_callback()`, `iop/retouch.c`) arm the tool again for the new algorithm and,
+while a tool is armed, commit through `dt_dev_history_commit_item_now()`. A widget built from the
+params commits through `dt_iop_gui_changed()` (`develop/imageop_gui.c`), which commits now instead
+of queueing when the widget carries the `"dt-masks-tool-setting"` object data; retouch's "heal
+algorithm" list does. Committing through the widget entry and arming again afterwards is not the
+same: ending the session sets the module's shapes to full edit (`masks_shown`), and retouch's
+"editing" button lit up at the next stroke.
+
+In retouch's "retouch tools" section, the buttons made to end the session still do: the armed
+shape's own button, and "editing", which switches to editing the shapes. Another shape's button
+arms the tool again for that shape.
+
+*Measured on top of `59d3244c5d`, 2026-11-09*, with the shim below on retouch: the brush armed by
+its button, one stroke, one control, then two more strokes:
+
+| control | before | through the widget entry | now |
+|---|---|---|---|
+| "blur" | armed, brush turned non-clone, 2 saved | ended, 0 | armed, non-clone, 2 |
+| "heal algorithm" list | armed, 2 | ended, 0 | armed, 2 |
+| the circle button | armed, circle, 2 | armed, circle, 2 | armed, circle, 2 |
+| the brush button again | ended | ended | ended |
+| "editing" | ended | ended | ended |
+
+"Editing" stays off while the tool is armed in every "now" case, as before. The "blur" click and the
+list change each add one undo step at once; before, the step came later, from the queue.
+
+**Two refreshes used to end a session behind the user's back.** `dt_iop_gui_blend_masks_update()`
+switched the masks off when the module's group had no shape, which is always the case before a
+session's first stroke; it left the module's brush button pressed after `dt_iop_gui_update()`,
+with creation off. Undo restored the edit mode recorded with the step, which ends any session.
+Both now leave an armed session alone.
+
+**The session overlay counts only the shapes the history still holds.** Its cache key was the
+number and the ids of the shapes saved in the session; an undo that takes one away leaves both
+unchanged, so the overlay kept painting the undone stroke from its cache until the next stroke.
+`_masks_draw_creation_session_forms()` now counts the ids that still resolve in `dev->forms`.
+
+Measured under ASan (Debug, clang 19) with a `LD_PRELOAD` shim. On the GUI thread, it arms the
+brush on "diffuse or sharpen", fires one gesture, then plays two strokes through
+`dt_control_button_pressed()`, `dt_control_mouse_moved()` and `dt_control_button_released()`, and
+counts the shapes they saved. Each case runs with the module's group empty and with one shape
+already saved:
+
+| gesture | before, empty | before, 1 shape | after, empty | after, 1 shape |
+|---|---|---|---|---|
+| none | armed, 2 saved | armed, 2 | armed, 2 | armed, 2 |
+| a module slider (1 → 2) | armed, 2 | armed, 2 | ended, 0 | ended, 0 |
+| the module's on/off switch | armed, 2 | armed, 2 | ended, 0 | ended, 0 |
+| the parametric mask's toggle | ended, 0 | armed, 2 | ended, 0 | ended, 0 |
+| `dt_apply_dev_history_update()` | ended, 0 | armed, 2 | ended, 0 | ended, 0 |
+| `dt_undo_do_undo()` | ended, 0 | ended, 0 | armed, 2 | armed, 2 |
+| `dt_iop_gui_update()` alone | ended, button still pressed | armed, 2 | armed, 2 | armed, 2 |
+
+With `-d perf`, the undo of the session's only stroke is followed by a re-render of the overlay
+counting 0 shapes; before the count changed, none came until the next stroke. No run reads freed
+memory.
 
 ## The shape manager's two lists, and the graph questions behind them
 

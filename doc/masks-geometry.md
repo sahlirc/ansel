@@ -23,12 +23,64 @@ node, `ctrl2`), then the centerline sampled **forward** from the first node to t
 **same** centerline sampled backward. The border wraps around the stroke, so the line under it is
 walked there and back (`_brush_get_pts_border()`); the backward half is never drawn.
 
+The border is index-aligned with the points, header included. A brush's and a polygon's border
+header repeats the outline's, three entries per node, and a polygon then writes each node's border
+handle into the first of the three (`_polygon_walk_write_header()`). Nothing reads the rest: the
+pipeline's area starts after the header (`_brush_bounding_box_raw()`). It used to be zeros, the
+image's origin, which every box taken over the whole buffer counted (see
+[`overlay-raster.md`](overlay-raster.md)).
+
 The forward half ends at `_brush_centerline_end()` — `node_count * 3 + (points_count - node_count
 * 3) / 2`, i.e. half of the **samples**. Half of the whole array is a different number: the header
 belongs to neither pass, so counting it in falls one and a half points per node short, and the
 last node's own coordinate sits at the very end of the forward pass. Everything that walks the
 drawn centerline (the outline stroking, the source shape, the clone link's midpoint) uses that
 helper.
+
+## A brush shorter than a pixel draws its source by its border
+
+*Found on top of `17a0cfe80b`, 2026-11-10.*
+
+A click without a drag makes a brush: the press records the first point, the release pads it with
+a second node a hundredth of a pixel away (`_brush_events_button_released()`), and the mask is the
+full disc of the border. Its centreline has no length. A brush draws the edge where its fading
+starts in every state ([`brush-boundary.md`](brush-boundary.md#where-the-fading-starts)), and its
+dotted centreline, for a dot two round end caps the width of the line, and its dashed border only
+while it is selected (on top of `2924759cfb`, 2026-11-11). Its clone source was not drawn at all,
+arrow included — `_brush_get_source_center()` anchors the link at the centreline's midpoint, and a
+line with no length has none.
+
+`_brush_is_dot()` is a centreline shorter than one pixel of the output image. For such a brush the
+link's two ends fall back to the first nodes. The source outline built for the GUI carries no border, so
+the dot's source is its border shifted by the source node minus the main node, the shift
+`_brush_get_distance()` already uses to hit the source, and drawn solid like every source
+outline. The shift is exact where the distortions after the module are affine; behind a lens
+correction or a perspective it is the same approximation the hit test makes. The overlay only
+composites what lies in the outline's box, so that box holds the shape's box carried onto the
+source (`dt_masks_gui_points_update_bbox()`, see [`overlay-raster.md`](overlay-raster.md)).
+
+The source is hit where it is drawn: `_brush_get_distance()` tests a brush's source by the cursor's
+reach around its centreline carried onto the source, which for a dot is its centre alone, so the
+dot's source is hit anywhere inside its border carried there, as a circle's source is inside its
+outline. It needs the box above as well: a cursor outside the box is answered "nothing here"
+before any sample is walked.
+
+*Measured on top of `17a0cfe80b`, 2026-11-10*, with an `LD_PRELOAD` shim on a RelWithDebInfo
+build, Xephyr at 1280×900, a JPEG at fit zoom: retouch's brush armed by its button, a click, a
+stroke, creation ended, every `dt_masks_draw_outline_runs()` call logged as a device-space bounding
+box. Before, the unselected click drew its centreline walk and nothing else, with no
+`dt_masks_draw_source()` call; the stroke drew its source. After, `dt_masks_draw_source()` runs
+for the click and draws a 32×32 px ring at its source. Selected, it had drawn its dashed border
+and still no source; it draws the same border and its source.
+
+*Checked on top of `0801e6eed1`, 2026-11-11*, with the overlay dumped (`MASKS_DUMP_OVERLAY`) by the
+same kind of shim right after the click, the dot unselected in its creation session: the canvas
+holds the source's ring and arrow and the brush cursor, and no ring at the shape.
+
+*Measured on top of `f4960a122d`, 2026-11-10*, with the same shim, the source placed by Shift+click
+and drawn as a ring of radius 16 px: the cursor moved from the source's centre outwards along
+each axis. It selected the source up to 4 px from the centre and nothing at 8, 12 and 15 px, not
+even the shape; it selects the source at every one of them.
 
 ## `inside_border` is proximity to the feather's outer line, not the feather band
 
@@ -76,11 +128,11 @@ something else happens to be drawn: a leftover tail comes out dashed when the sh
 border is stroked next, comes out highlighted when another shape is hovered, and is invisible when
 nothing is drawn after it. That is a path leak, not a style or selection bug.
 
-Which segments exist at all is decided by the caller's shape: an open path (a brush — the only
-caller asking for round ends, since only an open path has two true ends) has `node_count - 1`
-segments, a closed one has one more, and a shape still being created has no closing segment yet.
-The walk stops once it has stroked them all, so it must be handed a point count that lets it
-**reach** the last node.
+Which segments exist at all is decided by the caller's shape: an open path (a brush's centreline,
+the only caller passing `centreline`, and the only open path) has `node_count - 1` segments, a
+closed one has one more, and a shape still being created has no closing segment yet. The walk
+stops once it has stroked them all, so it must be handed a point count that lets it **reach** the
+last node.
 
 ## Brush masks rasterize as radial spokes — wedge holes across the stroke (CLOSED)
 
@@ -92,7 +144,7 @@ The walk stops once it has stroked them all, so it must be handed a point count 
 > switched off behind an always-FALSE `allow_border_gap_rounding` flag, so a joint had no border
 > samples across it and no spokes were stamped there. That flag had 3 occurrences at the report
 > commit and has **0** today; joints now go through `_brush_joint_arc()`
-> (`develop/masks/brush.c:947`) unconditionally, and the corpus runs a two-sided oracle with an
+> (`develop/masks/brush.c:948`) unconditionally, and the corpus runs a two-sided oracle with an
 > explicit MISSING map. Left marked OPEN, this section sent a reader to re-derive a landed fix.
 >
 > *One honest caveat:* the reporter's `_DSC9410.NEF` 57-node brush was never added to the corpus,
@@ -111,7 +163,7 @@ Two things make the diagnosis quick, and both were got wrong on the first pass:
   like that at a glance. Look at the small ones at full resolution instead: each has a
   *perfectly straight* edge cutting across the stroke, which no smooth outline produces.
 - **They are not the sparse-sampling path.** `use_sparse` is now
-  `pipe->mask_rasterization_step > 1` (`develop/masks/brush.c:3269`); the six hand-rolled copies
+  `pipe->mask_rasterization_step > 1` (`develop/masks/brush.c:3395`); the six hand-rolled copies
   of `has_preview_output() || type == THUMBNAIL` were deliberately removed because one pipe could
   be classified two ways inside a single frame (`develop/pixelpipe_hb.h:491`). The conclusion is
   unchanged and now holds structurally: the step defaults to 1 and only `dev->gui_attached`
@@ -265,6 +317,35 @@ rules that were each paid for by a reported defect:
   stretched at every run boundary. `dt_stroke_raster_path()` now carries one `_dash_t` across
   all its sub-paths: a dash is a function of the pixels of border drawn before it. A dash cut by
   a hidden stretch shows as a stub, which that metric owes.
+- **A brush's solid part is a disc union of its own** (on top of `0d108992d6`, 2026-11-12): a
+  node's solid radius is `fading · border`, eased between nodes by the radius's smoothstep, and a
+  spoke is solid out to its edge sample on the envelope of those discs, then ramps. The payload
+  holds that edge in the frame of its spoke, so it rides any distortion. The first `fading` of
+  each spoke, with the fading eased linearly, leaned with the border's rate: between two nodes of
+  one solid radius it bulged toward the wider node, and where one disc nests in the other it
+  thinned to a thread. The corpus's `solid part` judge fails it on 11 of 21 brushes and frames and
+  passes the union on all 21.
+- **Where a brush's fading starts is traced from a fill of its solid part, not walked over the
+  edge samples** (on top of `a8997b8e28`, 2026-11-11). Where the spokes lie along the spine, the
+  edge of their union is their sides -- 94 of the 872 px of `brush-fading-neck`'s edge then lay
+  more than 2 px from the line through the ends -- and no pass over the ends draws a side; on the
+  disc union, `dt_masks_outline_boundary_skips()` over the edge samples kept up to 1281 points
+  inside the solid part where the envelope folds, for no saving (on top of `0d108992d6`).
+  `dt_masks_solid_edge()` (`masks_solid.c`) fills the bands between neighbouring spokes, in runs
+  of one orientation, non-zero, and traces the half-coverage level. Two traps: the lobe of a
+  bow-tie band wound against its run cancels the band under it, so it is added back twice and
+  never dropped, however thin -- dropping those thinner than a tenth of a cell opened loops 86 px
+  inside the solid part, slivers along neighbouring spokes stacking; and a long spoke trembling
+  by a hundredth of a pixel turns a run at every band unless the turn waits for a tenth of a cell
+  of sweep (4621 runs to 1399 on `brush-1360-pressure-ramp`), and a run begins once its bands
+  have swept that far, summed, since a fast border samples the spine a fiftieth of a pixel apart.
+  A neck thinner than half a cell is under half coverage and, traced from the fill alone, breaks
+  into islands that float rounding chooses -- on `brush-fading-neck`, 9 loops with `-ffast-math`
+  and 7 without, where a Debug build fails the judge below -- so the cells the spine crosses are
+  set full before the trace, and the neck is one loop round it (on top of `aff63448d6`,
+  2026-11-12). It fills without cairo, for the toolkit ratchet. The corpus's `fading edge` judge
+  wants every pixel on the edge of the raster's full part within 4 px of the traced edge. The
+  full account is [Where the fading starts](brush-boundary.md#where-the-fading-starts).
 - **`MASKS_DUMP_OVERLAY=<dir>` makes the darkroom write what each frame drew**: the canvas
   before it is composited and cleared, the frame and dirty rectangles, and every cached outline
   with its skip ranges (`outline-<n>.txt`, the harness's format). It exists because a darkroom

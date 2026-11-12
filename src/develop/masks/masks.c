@@ -118,6 +118,8 @@ void dt_masks_form_gui_points_free(gpointer data)
   dt_pixelpipe_cache_free_align(gui_points->points);
   dt_pixelpipe_cache_free_align(gui_points->border);
   dt_pixelpipe_cache_free_align(gui_points->border_skips);
+  dt_pixelpipe_cache_free_align(gui_points->fading);
+  dt_pixelpipe_cache_free_align(gui_points->fading_breaks);
   dt_pixelpipe_cache_free_align(gui_points->source);
   dt_free(gui_points);
 }
@@ -236,22 +238,19 @@ int dt_masks_form_duplicate_in_group(dt_develop_t *develop, int group_id, int fo
 }
 
 dt_masks_raster_result_t dt_masks_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
-                               float **point_buffer, int *point_count,
-                               float **border_buffer, int *border_count,
-                               dt_masks_skip_range_t **border_skips, int *border_skip_count,
-                               int source, dt_iop_module_t *module)
+                                                    const dt_masks_outline_out_t *const out, int source,
+                                                    dt_iop_module_t *module)
 {
-  if(!IS_NULL_PTR(border_skips)) *border_skips = NULL;
-  if(!IS_NULL_PTR(border_skip_count)) *border_skip_count = 0;
+  if(!IS_NULL_PTR(out->border_skips)) *out->border_skips = NULL;
+  if(!IS_NULL_PTR(out->border_skip_count)) *out->border_skip_count = 0;
+  if(!IS_NULL_PTR(out->fading)) *out->fading = NULL;
 
   /* A shape type with no outline builder is a programming error, not an empty outline. */
   if(IS_NULL_PTR(mask_form->functions) || IS_NULL_PTR(mask_form->functions->get_points_border))
     return DT_MASKS_RASTER_ERROR;
 
   const dt_masks_raster_result_t status
-      = mask_form->functions->get_points_border(develop, mask_form, point_buffer, point_count,
-                                                border_buffer, border_count,
-                                                border_skips, border_skip_count, source, module);
+      = mask_form->functions->get_points_border(develop, mask_form, out, source, module);
 
   /* THE OUTLINE BUFFERS HOLD FINITE GEOMETRY AND NOTHING ELSE.
    *

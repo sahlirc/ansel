@@ -138,8 +138,8 @@ members in one per-shape table — that is the only reason every IOP that wants 
 sees cairo and GTK. The split is a parallel `dt_masks_gui_functions_t` registered per shape
 type. **The header split landed (T3b-1, `965e32ecbc`) but the vtable split did NOT**: `masks.h`
 keeps only the forward typedef at :128, and the body moved to
-`develop/masks/masks_functions.h:60` — where it still mixes `get_mask` (:91), `get_mask_roi`
-(:106), `mouse_moved` (:127), `mouse_scrolled` (:130) and `post_expose(cairo_t *cr, …)` (:142)
+`develop/masks/masks_functions.h:73` — where it still mixes `get_mask` (:109), `get_mask_roi`
+(:124), `mouse_moved` (:145), `mouse_scrolled` (:148) and `post_expose(cairo_t *cr, …)` (:160)
 in one table. **This is the one knot in this section still genuinely open.**
 `control/control.h` in masks.h supplied **zero symbols** — pure supply line, **deleted (T1c,
 `1127ce3d48`)**, and it had been feeding `control.h` to eight files that used none of it. Two traps: the spline sampler
@@ -157,7 +157,7 @@ gradientslider and collapsible_section includes each exist for one struct member
 headers, none of them GUI. (The cut point was quoted as "line 264" and never was — :261-275 is
 the `dt_develop_name_value_t` typedef and its `extern`s.) TRAP: the blend-mode name tables are
 extern'd in blend.h, and the worry was that they were **defined in `blend_gui.c` while backend
-`supervisor.c` consumes them** — headless linking would break. **They are in `blend.c:2296`**,
+`supervisor.c` consumes them** — headless linking would break. **They are in `blend.c:2331`**,
 and `blend.h:263-265` now carries the comment saying so; `supervisor.c:762` consumes them
 safely. The five pipeline files' upward reaches were three families: `dt_control_log` from
 worker threads, the progress banner + forced redraws in pixelpipe_hb.c, and the cache-wait
@@ -201,7 +201,7 @@ completed sequence, not as work waiting.
   (the name-table definitions were already in `blend.c`, so that half was a false alarm —
   see the knot above); `masks.h` drops control.h outright and moves `dt_masks_form_gui_t` +
   draw.h into a new `masks_gui.h`. **The GUI vtable did not move** and is still mixed into
-  `dt_masks_functions_t`, now at `develop/masks/masks_functions.h:60`. After T1, **90 IOPs
+  `dt_masks_functions_t`, now at `develop/masks/masks_functions.h:73`. After T1, **90 IOPs
   stopped receiving GTK through develop headers**.
 * **T2 — pipeline message/notification inversions** ✅ `8173ad4af1`: `dt_control_log` → a
   pipe-registered message handler (the `history/notify.h` shape, third time); progress + redraw

@@ -1,6 +1,7 @@
 /*
     This file is part of Ansel,
     Copyright (C) 2026 Aurélien PIERRE.
+    Copyright (C) 2026 Guillaume Stutin.
 
     Ansel is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -96,6 +97,41 @@ void dt_stroke_raster_touched_reset(cairo_surface_t *surface)
   if(!surface) return;
   _touched_t *record = _touched_of(surface, FALSE);
   if(record) record->any = FALSE;
+}
+
+void dt_stroke_raster_touch_path(cairo_t *cr)
+{
+  if(!cairo_has_current_point(cr)) return;
+  cairo_surface_t *surface = cairo_get_group_target(cr);
+  if(!dt_stroke_raster_can_paint(surface)) return;
+
+  /* The path's own extents, grown by half the line width: what a stroke with round or square
+   * ends covers, without paying for stroking it twice as cairo_stroke_extents() would. */
+  const double half = 0.5 * cairo_get_line_width(cr);
+  double box[4] = { 0.0 };   /* x0, y0, x1, y1 */
+  cairo_path_extents(cr, &box[0], &box[1], &box[2], &box[3]);
+
+  /* to the surface's pixels as dt_stroke_raster_path() maps them, corner by corner since the
+   * matrix may rotate */
+  double scale[2] = { 1.0, 1.0 };
+  double offset[2] = { 0.0, 0.0 };
+  cairo_surface_get_device_scale(surface, &scale[0], &scale[1]);
+  cairo_surface_get_device_offset(surface, &offset[0], &offset[1]);
+  double lo[2] = { DBL_MAX, DBL_MAX };
+  double hi[2] = { -DBL_MAX, -DBL_MAX };
+  for(int c = 0; c < 4; c++)
+  {
+    double p[2] = { (c & 1) ? box[2] + half : box[0] - half, (c & 2) ? box[3] + half : box[1] - half };
+    cairo_user_to_device(cr, &p[0], &p[1]);
+    for(int k = 0; k < 2; k++)
+    {
+      p[k] = p[k] * scale[k] + offset[k];
+      lo[k] = fmin(lo[k], p[k]);
+      hi[k] = fmax(hi[k], p[k]);
+    }
+  }
+  /* one more pixel each way for the antialiased edge */
+  _touched_add(surface, (int)floor(lo[0]) - 1, (int)floor(lo[1]) - 1, (int)ceil(hi[0]) + 1, (int)ceil(hi[1]) + 1);
 }
 
 gboolean dt_stroke_raster_can_paint(cairo_surface_t *surface)
